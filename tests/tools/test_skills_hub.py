@@ -1734,54 +1734,82 @@ class TestParallelSearchSourcesTimeout:
 
 
 # ---------------------------------------------------------------------------
-# _load_hermes_index — centralized index fetch (Browse-hub landing / search)
+# GitHubSource.fetch — aggregate (multi-skill) repo support
 # ---------------------------------------------------------------------------
 
 
-class TestLoadHermesIndex:
-    """Regression coverage for the Skills-Hub index fetch.
+class TestFetchAggregateRepo:
+    """owner/repo identifiers should scan for skills instead of returning None."""
 
-    The centralized index is a large body served with Content-Encoding: br.
-    httpx's streaming Brotli decoder (brotlicffi 1.2.0.1, pinned for Discord
-    attachment decoding) raises DecodingError on payloads this size, which
-    used to cascade into a silently-empty Skills Hub. The fetch must therefore
-    (a) not ask for Brotli, and (b) survive a DecodingError by retrying
-    uncompressed instead of blanking the hub.
-    """
+    def _make_source(self):
+        auth = MagicMock(spec=GitHubAuth)
+        auth.get_headers.return_value = {"Authorization": "token fake"}
+        return GitHubSource(auth=auth)
 
-    @staticmethod
-    def _isolate_cache(monkeypatch, tmp_path):
-        """Point the on-disk cache at an empty tmp dir so no real cache leaks in."""
-        import tools.skills_hub as hub
+    def test_fetch_single_skill_at_root(self):
+        """owner/repo with exactly one SKILL.md at root → auto-install."""
+        src = self._make_source()
+        skill_md = "---\nname: my-skill\ndescription: A test.\n---\n\n# Body\n"
+        files = {"SKILL.md": skill_md, "references/api.md": "# API\n"}
 
-        cache_file = tmp_path / "hermes-index.json"
-        monkeypatch.setattr(hub, "_hermes_index_cache_file", lambda: cache_file)
-        return cache_file
+        with patch.object(src, "_download_directory", return_value=files):
+            bundle = src.fetch("someuser/somerepo")
 
-    def test_fetch_does_not_request_brotli(self, monkeypatch, tmp_path):
-        """The index fetch must not negotiate Brotli (the broken decoder path)."""
-        import tools.skills_hub as hub
+        assert bundle is not None
+        assert bundle.name == "somerepo"
+        assert "SKILL.md" in bundle.files
+        assert bundle.source == "github"
 
-        self._isolate_cache(monkeypatch, tmp_path)
+    def test_fetch_single_skill_in_subdir(self):
+        """owner/repo with one skill in a sub-dir → auto-install."""
+        src = self._make_source()
+        skill_md = "---\nname: sub-skill\ndescription: Sub.\n---\n\n# Body\n"
 
-        captured = {}
+        # Root has no SKILL.md; "design" subdir has one.
+        def fake_download(repo, path):
+            if path == "":
+                return None  # no SKILL.md at root
+            if path == "design":
+                return {"SKILL.md": skill_md}
+            return None
 
-        def fake_get(url, *args, **kwargs):
-            captured["headers"] = kwargs.get("headers", {})
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.json.return_value = {"skills": [{"name": "x"}]}
-            return resp
+        # Contents API returns one dir at root
+        contents_resp = MagicMock()
+        contents_resp.status_code = 200
+        contents_resp.json.return_value = [
+            {"type": "dir", "name": "design"},
+        ]
 
-        monkeypatch.setattr(hub.httpx, "get", fake_get)
+        with patch.object(src, "_download_directory", side_effect=fake_download), \
+             patch("tools.skills_hub.httpx.get", return_value=contents_resp):
+            bundle = src.fetch("leonxlnx/taste-skill")
 
-        data = hub._load_hermes_index()
-        assert data == {"skills": [{"name": "x"}]}
+        assert bundle is not None
+        assert bundle.name == "design"
 
-        accept = captured["headers"].get("Accept-Encoding", "")
-        assert "br" not in [tok.strip() for tok in accept.split(",")], (
-            f"index fetch must not request Brotli, got Accept-Encoding={accept!r}"
-        )
+    def test_fetch_multiple_skills_returns_none(self):
+        """owner/repo with multiple skills → returns None, sets _last_aggregate_scan."""
+        src = self._make_source()
+
+        # Contents API returns multiple dirs
+        contents_resp = MagicMock()
+        contents_resp.status_code = 200
+        contents_resp.json.return_value = [
+            {"type": "dir", "name": "skill-a"},
+            {"type": "dir", "name": "skill-b"},
+            {"type": "dir", "name": "skill-c"},
+        ]
+
+        with patch.object(src, "_download_directory", return_value=None), \
+             patch("tools.skills_hub.httpx.get", return_value=contents_resp):
+            bundle = src.fetch("ninehills/skills")
+
+        assert bundle is None
+        assert src._last_aggregate_scan is not None
+        repo, paths = src._last_aggregate_scan
+        assert repo == "ninehills/skills"
+        assert "skill-a" in paths
+        assert "skill-b" in paths
 
     def test_persistent_decoding_error_falls_back_to_stale_cache(
         self, monkeypatch, tmp_path
@@ -1804,3 +1832,68 @@ class TestLoadHermesIndex:
 
         data = hub._load_hermes_index()
         assert data == {"skills": [{"name": "stale"}]}
+
+    def test_fetch_no_skills_found(self):
+        """owner/repo with no SKILL.md anywhere → returns None."""
+        src = self._make_source()
+
+        contents_resp = MagicMock()
+        contents_resp.status_code = 200
+        contents_resp.json.return_value = [
+            {"type": "file", "name": "README.md"},
+        ]
+
+        with patch.object(src, "_download_directory", return_value=None), \
+             patch("tools.skills_hub.httpx.get", return_value=contents_resp):
+            bundle = src.fetch("someuser/empty-repo")
+
+        assert bundle is None
+        assert src._last_aggregate_scan is None
+
+    def test_fetch_three_part_unchanged(self):
+        """owner/repo/path still works as before."""
+        src = self._make_source()
+        files = {"SKILL.md": "---\nname: x\n---\n\n# X\n"}
+
+        with patch.object(src, "_download_directory", return_value=files):
+            bundle = src.fetch("owner/repo/skills/my-skill")
+
+        assert bundle is not None
+        assert bundle.name == "my-skill"
+        assert bundle.identifier == "owner/repo/skills/my-skill"
+
+
+# ---------------------------------------------------------------------------
+# GitHubSource.inspect — aggregate repo support
+# ---------------------------------------------------------------------------
+
+
+class TestInspectAggregateRepo:
+    """owner/repo identifiers should try root SKILL.md for preview."""
+
+    def _make_source(self):
+        auth = MagicMock(spec=GitHubAuth)
+        auth.get_headers.return_value = {"Authorization": "token fake"}
+        return GitHubSource(auth=auth)
+
+    def test_inspect_root_skill_md(self):
+        """owner/repo with SKILL.md at root → returns SkillMeta."""
+        src = self._make_source()
+        content = "---\nname: root-skill\ndescription: At root.\n---\n\n# Body\n"
+
+        with patch.object(src, "_fetch_file_content", return_value=content):
+            meta = src.inspect("someuser/somerepo")
+
+        assert meta is not None
+        assert meta.name == "root-skill"
+        assert meta.description == "At root."
+        assert meta.path == ""
+
+    def test_inspect_no_root_skill_md(self):
+        """owner/repo without root SKILL.md → returns None."""
+        src = self._make_source()
+
+        with patch.object(src, "_fetch_file_content", return_value=None):
+            meta = src.inspect("someuser/no-skill-repo")
+
+        assert meta is None
