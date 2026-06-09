@@ -308,6 +308,356 @@ class TestCreateThread:
 
 
 # ---------------------------------------------------------------------------
+# Actions: edit_message / add_reaction / remove_reaction
+# ---------------------------------------------------------------------------
+
+class TestEditMessage:
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_message_content(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "99", "content": "Edited!"}
+        result = json.loads(discord_admin_handler(
+            action="edit_message", channel_id="11", message_id="99", content="Edited!",
+        ))
+        assert result["success"] is True
+        assert result["content"] == "Edited!"
+        mock_req.assert_called_once_with(
+            "PATCH", "/channels/11/messages/99", "test-token",
+            body={"content": "Edited!"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_message_no_fields_error(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="edit_message", channel_id="11", message_id="99",
+        ))
+        assert "error" in result
+        assert "No edit fields" in result["error"]
+
+
+class TestReactions:
+    @patch("tools.discord_tool._discord_request")
+    def test_add_reaction(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="add_reaction", channel_id="11", message_id="99", emoji="👍",
+        ))
+        assert result["success"] is True
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "PUT"
+        assert "reactions/%F0%9F%91%8D/@me" in call_args[0][1]
+
+    @patch("tools.discord_tool._discord_request")
+    def test_remove_reaction(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="remove_reaction", channel_id="11", message_id="99", emoji="🔥",
+        ))
+        assert result["success"] is True
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "DELETE"
+        assert "reactions/%F0%9F%94%A5/@me" in call_args[0][1]
+
+
+# ---------------------------------------------------------------------------
+# Actions: thread management
+# ---------------------------------------------------------------------------
+
+class TestThreadManagement:
+    @patch("tools.discord_tool._discord_request")
+    def test_archive_thread(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="archive_thread", channel_id="800",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/channels/800", "test-token", body={"archived": True},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_unarchive_thread(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="unarchive_thread", channel_id="800",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/channels/800", "test-token", body={"archived": False},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_thread(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="delete_thread", channel_id="800",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "DELETE", "/channels/800", "test-token",
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_list_thread_members(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = [
+            {"user_id": "1", "join_timestamp": "2024-01-01", "flags": 0},
+            {"user_id": "2", "join_timestamp": "2024-01-02", "flags": 1},
+        ]
+        result = json.loads(discord_admin_handler(
+            action="list_thread_members", channel_id="800",
+        ))
+        assert result["count"] == 2
+        assert result["members"][0]["user_id"] == "1"
+        mock_req.assert_called_once_with(
+            "GET", "/channels/800/thread-members", "test-token",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Actions: scheduled events
+# ---------------------------------------------------------------------------
+
+class TestScheduledEvents:
+    @patch("tools.discord_tool._discord_request")
+    def test_list_scheduled_events(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = [
+            {
+                "id": "100",
+                "name": "Town Hall",
+                "description": "Monthly meeting",
+                "scheduled_start_time": "2024-06-01T18:00:00Z",
+                "scheduled_end_time": None,
+                "privacy_level": 2,
+                "status": 1,
+                "entity_type": 2,
+                "entity_id": None,
+                "creator_id": "42",
+                "user_count": 5,
+            }
+        ]
+        result = json.loads(discord_admin_handler(
+            action="list_scheduled_events", guild_id="111",
+        ))
+        assert result["count"] == 1
+        assert result["events"][0]["name"] == "Town Hall"
+        mock_req.assert_called_once_with(
+            "GET", "/guilds/111/scheduled-events", "test-token", params={"with_user_count": "true"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_create_scheduled_event_voice(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "101", "name": "Voice Event", "scheduled_start_time": "2024-06-01T18:00:00Z"}
+        result = json.loads(discord_admin_handler(
+            action="create_scheduled_event",
+            guild_id="111",
+            name="Voice Event",
+            scheduled_start_time="2024-06-01T18:00:00Z",
+            channel_id="22",
+            event_type="voice",
+        ))
+        assert result["success"] is True
+        assert result["event_id"] == "101"
+        mock_req.assert_called_once()
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "POST"
+        assert call_args[0][1] == "/guilds/111/scheduled-events"
+        assert call_args[1]["body"]["name"] == "Voice Event"
+        assert call_args[1]["body"]["entity_type"] == 2
+        assert call_args[1]["body"]["channel_id"] == "22"
+
+    @patch("tools.discord_tool._discord_request")
+    def test_create_scheduled_event_external_no_location(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="create_scheduled_event",
+            guild_id="111",
+            name="External Event",
+            scheduled_start_time="2024-06-01T18:00:00Z",
+            event_type="external",
+        ))
+        assert "error" in result
+        assert "location" in result["error"]
+        mock_req.assert_not_called()
+
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_scheduled_event(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "100", "name": "Updated Event"}
+        result = json.loads(discord_admin_handler(
+            action="edit_scheduled_event",
+            guild_id="111",
+            event_id="100",
+            name="Updated Event",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/guilds/111/scheduled-events/100", "test-token",
+            body={"name": "Updated Event"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_scheduled_event_no_fields_error(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="edit_scheduled_event", guild_id="111", event_id="100",
+        ))
+        assert "error" in result
+        assert "No edit fields" in result["error"]
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_scheduled_event(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="delete_scheduled_event", guild_id="111", event_id="100",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "DELETE", "/guilds/111/scheduled-events/100", "test-token",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Actions: send_message / crosspost_message / create_poll
+# ---------------------------------------------------------------------------
+
+class TestSendMessage:
+    @patch("tools.discord_tool._discord_request")
+    def test_send_message(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "200", "channel_id": "11"}
+        result = json.loads(discord_admin_handler(
+            action="send_message", channel_id="11", content="Hello world",
+        ))
+        assert result["success"] is True
+        assert result["message_id"] == "200"
+        mock_req.assert_called_once_with(
+            "POST", "/channels/11/messages", "test-token",
+            body={"content": "Hello world"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_send_message_reply(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "201", "channel_id": "11"}
+        result = json.loads(discord_admin_handler(
+            action="send_message", channel_id="11", content="Replying",
+            reply_to_message_id="99",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "POST", "/channels/11/messages", "test-token",
+            body={"content": "Replying", "message_reference": {"message_id": "99"}},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_send_message_no_content_error(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="send_message", channel_id="11",
+        ))
+        assert "error" in result
+        assert "content" in result["error"]
+
+
+class TestCrosspostMessage:
+    @patch("tools.discord_tool._discord_request")
+    def test_crosspost_message(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "99"}
+        result = json.loads(discord_admin_handler(
+            action="crosspost_message", channel_id="11", message_id="99",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "POST", "/channels/11/messages/99/crosspost", "test-token",
+        )
+
+
+class TestCreatePoll:
+    @patch("tools.discord_tool._discord_request")
+    def test_create_poll(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"id": "300", "channel_id": "11", "poll": {"question": {"text": "Yes or No?"}}}
+        result = json.loads(discord_admin_handler(
+            action="create_poll", channel_id="11",
+            poll_question="Yes or No?",
+            poll_answers="Yes,No,Maybe",
+            poll_duration=48,
+            poll_multiselect=True,
+        ))
+        assert result["success"] is True
+        assert result["poll"] is True
+        call_args = mock_req.call_args
+        assert call_args[0][0] == "POST"
+        body = call_args[1]["body"]
+        assert body["poll"]["question"]["text"] == "Yes or No?"
+        assert len(body["poll"]["answers"]) == 3
+        assert body["poll"]["answers"][0]["poll_media"]["text"] == "Yes"
+        assert body["poll"]["duration"] == 48
+        assert body["poll"]["allow_multiselect"] is True
+
+    @patch("tools.discord_tool._discord_request")
+    def test_create_poll_too_few_answers(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="create_poll", channel_id="11",
+            poll_question="One answer?",
+            poll_answers="Only",
+        ))
+        assert "error" in result
+        assert "2-10 answers" in result["error"]
+        mock_req.assert_not_called()
+
+    @patch("tools.discord_tool._discord_request")
+    def test_create_poll_no_question_error(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="create_poll", channel_id="11",
+            poll_answers="A,B",
+        ))
+        assert "error" in result
+        assert "poll_question" in result["error"]
+        mock_req.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Actions: add_role / remove_role
+# ---------------------------------------------------------------------------
+
+class TestRoleManagement:
+    @patch("tools.discord_tool._discord_request")
+    def test_add_role(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="add_role", guild_id="111", user_id="42", role_id="2",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PUT", "/guilds/111/members/42/roles/2", "test-token",
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_remove_role(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="remove_role", guild_id="111", user_id="42", role_id="2",
+        ))
+        assert result["success"] is True
+
+
+# ---------------------------------------------------------------------------
 # Error handling
 # ---------------------------------------------------------------------------
 
@@ -330,7 +680,70 @@ class TestErrorHandling:
 
 
 # ---------------------------------------------------------------------------
-# Registration
+# Actions: voice management
+# ---------------------------------------------------------------------------
+
+class TestVoiceManagement:
+    @patch("tools.discord_tool._discord_request")
+    def test_mute_member(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="mute_member", guild_id="111", user_id="42",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/guilds/111/members/42", "test-token", body={"mute": True},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_unmute_member(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="unmute_member", guild_id="111", user_id="42",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/guilds/111/members/42", "test-token", body={"mute": False},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_move_member(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="move_member", guild_id="111", user_id="42", channel_id="22",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/guilds/111/members/42", "test-token", body={"channel_id": "22"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_move_member_no_channel_error(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="move_member", guild_id="111", user_id="42",
+        ))
+        assert "error" in result
+        assert "channel_id" in result["error"]  # caught by _REQUIRED_PARAMS
+
+    @patch("tools.discord_tool._discord_request")
+    def test_disconnect_member(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = None
+        result = json.loads(discord_admin_handler(
+            action="disconnect_member", guild_id="111", user_id="42",
+        ))
+        assert result["success"] is True
+        mock_req.assert_called_once_with(
+            "PATCH", "/guilds/111/members/42", "test-token", body={"channel_id": None},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Actions: add_role / remove_role
 # ---------------------------------------------------------------------------
 
 class TestRegistration:
