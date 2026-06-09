@@ -54,16 +54,20 @@ def _get_bot_token() -> Optional[str]:
 
 def _discord_request(
     method: str, path: str, token: str, params: Optional[Dict[str, str]] = None,
-    body: Optional[Dict[str, Any]] = None, timeout: int = 15) -> Any:
+    body: Optional[Dict[str, Any]] = None, timeout: int = 15,
+    reason: str = "") -> Any:
     """Make a request to the Discord REST API."""
     url = f"{DISCORD_API_BASE}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
+    headers = {
+        "Authorization": f"Bot {token}", "Content-Type": "application/json",
+        "User-Agent": "Hermes-Agent (https://github.com/NousResearch/hermes-agent)"}
+    if reason:
+        headers["X-Audit-Log-Reason"] = urllib.parse.quote(reason)
     req = urllib.request.Request(
-        url, data=None if body is None else json.dumps(body).encode("utf-8"), method=method,
-        headers={
-            "Authorization": f"Bot {token}", "Content-Type": "application/json",
-            "User-Agent": "Hermes-Agent (https://github.com/NousResearch/hermes-agent)"})
+        url, data=None if body is None else json.dumps(body).encode("utf-8"),
+        method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 204:
@@ -388,6 +392,623 @@ _remove_role = _mutation(
     "Role {role_id} removed from user {user_id}.")
 
 
+def _kick_member(token: str, guild_id: str, user_id: str, reason: str = "", **_kwargs: Any) -> str:
+    """Kick a member from the guild."""
+    _discord_request(
+        "DELETE", f"/guilds/{guild_id}/members/{user_id}", token,
+        reason=reason,
+    )
+    return json.dumps({"success": True, "message": f"User {user_id} kicked."})
+
+
+def _ban_member(
+    token: str, guild_id: str, user_id: str,
+    reason: str = "", delete_message_days: int = 0,
+    **_kwargs: Any,
+) -> str:
+    """Ban a user from the guild."""
+    body: Dict[str, Any] = {"delete_message_days": min(delete_message_days, 7)}
+    _discord_request(
+        "PUT", f"/guilds/{guild_id}/bans/{user_id}", token,
+        body=body, reason=reason,
+    )
+    return json.dumps({"success": True, "message": f"User {user_id} banned."})
+
+
+def _unban_member(token: str, guild_id: str, user_id: str, **_kwargs: Any) -> str:
+    """Unban a user from the guild."""
+    _discord_request("DELETE", f"/guilds/{guild_id}/bans/{user_id}", token)
+    return json.dumps({"success": True, "message": f"User {user_id} unbanned."})
+
+
+def _timeout_member(
+    token: str, guild_id: str, user_id: str,
+    duration_minutes: int = 60, reason: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Timeout (mute) a guild member for a specified duration (max 28 days)."""
+    from datetime import datetime, timedelta, timezone
+    max_delta = timedelta(days=28)
+    delta = timedelta(minutes=duration_minutes)
+    if delta > max_delta:
+        delta = max_delta
+    until = datetime.now(timezone.utc) + delta
+    body: Dict[str, Any] = {"communication_disabled_until": until.isoformat()}
+    _discord_request(
+        "PATCH", f"/guilds/{guild_id}/members/{user_id}", token,
+        body=body, reason=reason,
+    )
+    return json.dumps({
+        "success": True,
+        "message": f"User {user_id} timed out until {until.isoformat()}.",
+    })
+
+
+def _remove_timeout_member(token: str, guild_id: str, user_id: str, **_kwargs: Any) -> str:
+    """Remove timeout from a guild member."""
+    body = {"communication_disabled_until": None}
+    _discord_request("PATCH", f"/guilds/{guild_id}/members/{user_id}", token, body=body)
+    return json.dumps({"success": True, "message": f"Timeout removed for user {user_id}."})
+
+
+def _manage_nickname(
+    token: str, guild_id: str, user_id: str, nickname: str = "", **_kwargs: Any,
+) -> str:
+    """Change a member's nickname. Pass empty string to reset."""
+    body: Dict[str, Any] = {"nick": nickname or None}
+    _discord_request("PATCH", f"/guilds/{guild_id}/members/{user_id}", token, body=body)
+    return json.dumps({
+        "success": True,
+        "message": f"Nickname for user {user_id} set to '{nickname}'.",
+    })
+
+
+def _change_nickname(token: str, guild_id: str, nickname: str = "", **_kwargs: Any) -> str:
+    """Change the bot's own nickname in this guild."""
+    body: Dict[str, Any] = {"nick": nickname or None}
+    _discord_request("PATCH", f"/guilds/{guild_id}/members/@me/nick", token, body=body)
+    return json.dumps({
+        "success": True,
+        "message": f"Bot nickname set to '{nickname}'.",
+    })
+
+
+def _bulk_delete_messages(
+    token: str, channel_id: str, message_ids: str = "", **_kwargs: Any,
+) -> str:
+    """Bulk delete messages (2-100 messages). Pass message_ids as comma-separated list."""
+    ids = [m.strip() for m in message_ids.split(",") if m.strip()]
+    if len(ids) < 2:
+        return json.dumps({
+            "error": "bulk_delete_messages requires at least 2 message_ids (comma-separated).",
+        })
+    if len(ids) > 100:
+        ids = ids[:100]
+    _discord_request("POST", f"/channels/{channel_id}/messages/bulk-delete", token, body={"messages": ids})
+    return json.dumps({"success": True, "message": f"Deleted {len(ids)} messages."})
+
+
+# ---------------------------------------------------------------------------
+# Channel management
+# ---------------------------------------------------------------------------
+
+def _create_channel(
+    token: str, guild_id: str, name: str, channel_type: str = "text",
+    topic: str = "", parent_id: str = "", nsfw: bool = False,
+    **_kwargs: Any,
+) -> str:
+    """Create a new channel in a guild.
+
+    channel_type: text (0), voice (2), announcement (5), forum (15), media (16).
+    """
+    type_map = {"text": 0, "voice": 2, "announcement": 5, "forum": 15, "media": 16}
+    body: Dict[str, Any] = {
+        "name": name,
+        "type": type_map.get(channel_type, 0),
+    }
+    if topic:
+        body["topic"] = topic
+    if parent_id:
+        body["parent_id"] = parent_id
+    if nsfw:
+        body["nsfw"] = True
+    ch = _discord_request("POST", f"/guilds/{guild_id}/channels", token, body=body)
+    return json.dumps({
+        "success": True,
+        "channel_id": ch["id"],
+        "name": ch.get("name"),
+        "type": _channel_type_name(ch.get("type", 0)),
+    })
+
+
+def _edit_channel(
+    token: str, channel_id: str, name: str = "", topic: str = "",
+    nsfw: Optional[bool] = None, parent_id: str = "",
+    rate_limit_per_user: int = -1, **_kwargs: Any,
+) -> str:
+    """Edit a channel's settings. Only provided fields are changed."""
+    body: Dict[str, Any] = {}
+    if name:
+        body["name"] = name
+    if topic:
+        body["topic"] = topic
+    if nsfw is not None:
+        body["nsfw"] = nsfw
+    if parent_id:
+        body["parent_id"] = parent_id
+    if rate_limit_per_user >= 0:
+        body["rate_limit_per_user"] = rate_limit_per_user
+    if not body:
+        return json.dumps({"error": "No fields to edit. Provide at least one of: name, topic, nsfw, parent_id, rate_limit_per_user."})
+    ch = _discord_request("PATCH", f"/channels/{channel_id}", token, body=body)
+    return json.dumps({
+        "success": True,
+        "channel_id": ch["id"],
+        "name": ch.get("name"),
+        "type": _channel_type_name(ch.get("type", 0)),
+    })
+
+
+def _delete_channel(token: str, channel_id: str, **_kwargs: Any) -> str:
+    """Delete a channel or category."""
+    ch = _discord_request("DELETE", f"/channels/{channel_id}", token)
+    return json.dumps({
+        "success": True,
+        "channel_id": ch.get("id") if ch else channel_id,
+        "message": f"Channel {channel_id} deleted.",
+    })
+
+
+def _create_category(token: str, guild_id: str, name: str, **_kwargs: Any) -> str:
+    """Create a new category (channel type 4) in a guild."""
+    body = {"name": name, "type": 4}
+    ch = _discord_request("POST", f"/guilds/{guild_id}/channels", token, body=body)
+    return json.dumps({
+        "success": True,
+        "category_id": ch["id"],
+        "name": ch.get("name"),
+    })
+
+
+# ---------------------------------------------------------------------------
+# Role management
+# ---------------------------------------------------------------------------
+
+def _create_role(
+    token: str, guild_id: str, name: str, color: str = "",
+    hoist: bool = False, mentionable: bool = False,
+    permissions: str = "", **_kwargs: Any,
+) -> str:
+    """Create a new role in a guild.
+
+    color: hex string like '#FF0000'. permissions: optional bitfield string.
+    """
+    body: Dict[str, Any] = {"name": name, "hoist": hoist, "mentionable": mentionable}
+    if color:
+        try:
+            body["color"] = int(color.lstrip("#"), 16)
+        except ValueError:
+            pass
+    if permissions:
+        body["permissions"] = permissions
+    r = _discord_request("POST", f"/guilds/{guild_id}/roles", token, body=body)
+    return json.dumps({
+        "success": True,
+        "role_id": r["id"],
+        "name": r.get("name"),
+        "color": f"#{r.get('color', 0):06x}" if r.get("color") else None,
+    })
+
+
+def _edit_role(
+    token: str, guild_id: str, role_id: str, name: str = "",
+    color: str = "", hoist: Optional[bool] = None,
+    mentionable: Optional[bool] = None, permissions: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Edit an existing role. Only provided fields are changed."""
+    body: Dict[str, Any] = {}
+    if name:
+        body["name"] = name
+    if color:
+        try:
+            body["color"] = int(color.lstrip("#"), 16)
+        except ValueError:
+            pass
+    if hoist is not None:
+        body["hoist"] = hoist
+    if mentionable is not None:
+        body["mentionable"] = mentionable
+    if permissions:
+        body["permissions"] = permissions
+    if not body:
+        return json.dumps({"error": "No fields to edit. Provide at least one of: name, color, hoist, mentionable, permissions."})
+    r = _discord_request("PATCH", f"/guilds/{guild_id}/roles/{role_id}", token, body=body)
+    return json.dumps({
+        "success": True,
+        "role_id": r["id"],
+        "name": r.get("name"),
+    })
+
+
+def _delete_role(token: str, guild_id: str, role_id: str, **_kwargs: Any) -> str:
+    """Delete a role from a guild."""
+    _discord_request("DELETE", f"/guilds/{guild_id}/roles/{role_id}", token)
+    return json.dumps({"success": True, "message": f"Role {role_id} deleted."})
+
+
+# ---------------------------------------------------------------------------
+# Webhook management
+# ---------------------------------------------------------------------------
+
+def _list_webhooks(token: str, channel_id: str = "", guild_id: str = "", **_kwargs: Any) -> str:
+    """List webhooks in a channel or guild. Provide channel_id OR guild_id."""
+    if channel_id:
+        hooks = _discord_request("GET", f"/channels/{channel_id}/webhooks", token)
+    elif guild_id:
+        hooks = _discord_request("GET", f"/guilds/{guild_id}/webhooks", token)
+    else:
+        return json.dumps({"error": "Provide either channel_id or guild_id."})
+    result = []
+    for h in hooks:
+        result.append({
+            "id": h["id"],
+            "name": h.get("name"),
+            "channel_id": h.get("channel_id"),
+            "avatar": h.get("avatar"),
+            "token": bool(h.get("token")),
+        })
+    return json.dumps({"webhooks": result, "count": len(result)})
+
+
+def _create_webhook(token: str, channel_id: str, name: str, **_kwargs: Any) -> str:
+    """Create a new webhook in a channel."""
+    body = {"name": name}
+    h = _discord_request("POST", f"/channels/{channel_id}/webhooks", token, body=body)
+    return json.dumps({
+        "success": True,
+        "webhook_id": h["id"],
+        "name": h.get("name"),
+        "token": h.get("token"),
+        "url": f"https://discord.com/api/v10/webhooks/{h['id']}/{h.get('token', '')}" if h.get("token") else None,
+    })
+
+
+def _delete_webhook(token: str, webhook_id: str, **_kwargs: Any) -> str:
+    """Delete a webhook."""
+    _discord_request("DELETE", f"/webhooks/{webhook_id}", token)
+    return json.dumps({"success": True, "message": f"Webhook {webhook_id} deleted."})
+
+
+# ---------------------------------------------------------------------------
+# Message editing & reactions
+# ---------------------------------------------------------------------------
+
+def _edit_message(
+    token: str, channel_id: str, message_id: str,
+    content: str = "", embed_json: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Edit an existing message in a channel or thread."""
+    body: Dict[str, Any] = {}
+    if content:
+        body["content"] = content
+    if embed_json:
+        body["embeds"] = json.loads(embed_json)
+    if not body:
+        return json.dumps({"error": "No edit fields provided (content or embed_json required)."})
+    msg = _discord_request("PATCH", f"/channels/{channel_id}/messages/{message_id}", token, body=body)
+    return json.dumps({"success": True, "message_id": msg["id"], "content": msg.get("content", "")})
+
+
+def _add_reaction(token: str, channel_id: str, message_id: str, emoji: str, **_kwargs: Any) -> str:
+    """Add a reaction (emoji) to a message. Emoji can be Unicode or :name:id format."""
+    # URL-encode emoji for the path
+    encoded = urllib.parse.quote(emoji, safe="")
+    _discord_request("PUT", f"/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me", token)
+    return json.dumps({"success": True, "message": f"Reaction {emoji} added to message {message_id}."})
+
+
+def _remove_reaction(token: str, channel_id: str, message_id: str, emoji: str, **_kwargs: Any) -> str:
+    """Remove the bot's own reaction from a message."""
+    encoded = urllib.parse.quote(emoji, safe="")
+    _discord_request("DELETE", f"/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me", token)
+    return json.dumps({"success": True, "message": f"Reaction {emoji} removed from message {message_id}."})
+
+
+# ---------------------------------------------------------------------------
+# Thread management
+# ---------------------------------------------------------------------------
+
+def _archive_thread(token: str, channel_id: str, **_kwargs: Any) -> str:
+    """Archive a thread (channel_id is the thread ID)."""
+    _discord_request("PATCH", f"/channels/{channel_id}", token, body={"archived": True})
+    return json.dumps({"success": True, "message": f"Thread {channel_id} archived."})
+
+
+def _unarchive_thread(token: str, channel_id: str, **_kwargs: Any) -> str:
+    """Unarchive a thread (channel_id is the thread ID)."""
+    _discord_request("PATCH", f"/channels/{channel_id}", token, body={"archived": False})
+    return json.dumps({"success": True, "message": f"Thread {channel_id} unarchived."})
+
+
+def _delete_thread(token: str, channel_id: str, **_kwargs: Any) -> str:
+    """Delete a thread permanently (channel_id is the thread ID)."""
+    _discord_request("DELETE", f"/channels/{channel_id}", token)
+    return json.dumps({"success": True, "message": f"Thread {channel_id} deleted."})
+
+
+def _list_thread_members(token: str, channel_id: str, **_kwargs: Any) -> str:
+    """List members of a thread (channel_id is the thread ID)."""
+    members = _discord_request("GET", f"/channels/{channel_id}/thread-members", token)
+    result = []
+    for m in members:
+        result.append({
+            "user_id": m["user_id"],
+            "join_timestamp": m.get("join_timestamp"),
+            "flags": m.get("flags"),
+        })
+    return json.dumps({"members": result, "count": len(result)})
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+
+def _get_audit_log(
+    token: str, guild_id: str, limit: int = 50,
+    action_type: int = 0, user_id: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Fetch the guild's audit log.
+
+    action_type: filter by event type (see Discord docs). 0 means no filter.
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    params: Dict[str, str] = {"limit": str(min(limit, 100))}
+    if action_type:
+        params["action_type"] = str(action_type)
+    if user_id:
+        params["user_id"] = user_id
+    log = _discord_request("GET", f"/guilds/{guild_id}/audit-logs", token, params=params)
+    entries = log.get("audit_log_entries", [])
+    result = []
+    for entry in entries:
+        result.append({
+            "id": entry["id"],
+            "action_type": entry.get("action_type"),
+            "user_id": entry.get("user_id"),
+            "target_id": entry.get("target_id"),
+            "reason": entry.get("reason"),
+            "created_at": entry.get("created_at"),
+        })
+    return json.dumps({
+        "entries": result,
+        "count": len(result),
+        "users": [{"id": u["id"], "username": u.get("username")} for u in log.get("users", [])],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Scheduled events
+# ---------------------------------------------------------------------------
+
+def _list_scheduled_events(token: str, guild_id: str, **_kwargs: Any) -> str:
+    """List scheduled events in a guild."""
+    events = _discord_request("GET", f"/guilds/{guild_id}/scheduled-events", token, params={"with_user_count": "true"})
+    result = []
+    for ev in events:
+        result.append({
+            "id": ev["id"],
+            "name": ev.get("name"),
+            "description": ev.get("description"),
+            "scheduled_start_time": ev.get("scheduled_start_time"),
+            "scheduled_end_time": ev.get("scheduled_end_time"),
+            "privacy_level": ev.get("privacy_level"),
+            "status": ev.get("status"),
+            "entity_type": ev.get("entity_type"),
+            "entity_id": ev.get("entity_id"),
+            "creator_id": ev.get("creator_id"),
+            "user_count": ev.get("user_count"),
+        })
+    return json.dumps({"events": result, "count": len(result)})
+
+
+def _create_scheduled_event(
+    token: str, guild_id: str, name: str,
+    scheduled_start_time: str = "",
+    scheduled_end_time: str = "",
+    event_type: str = "voice",
+    channel_id: str = "",
+    description: str = "",
+    location: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Create a scheduled event in a guild.
+
+    event_type: "stage" (1), "voice" (2), or "external" (3).
+    channel_id required for stage/voice; location required for external.
+    """
+    type_map = {"stage": 1, "voice": 2, "external": 3}
+    entity_type = type_map.get(event_type.lower(), 2)
+
+    body: Dict[str, Any] = {
+        "name": name,
+        "privacy_level": 2,
+        "scheduled_start_time": scheduled_start_time,
+        "entity_type": entity_type,
+    }
+    if scheduled_end_time:
+        body["scheduled_end_time"] = scheduled_end_time
+    if description:
+        body["description"] = description
+
+    if entity_type == 3:
+        if not location:
+            return json.dumps({"error": "External events require a location."})
+        if not scheduled_end_time:
+            return json.dumps({"error": "External events require a scheduled_end_time."})
+        body["entity_metadata"] = {"location": location}
+        body["scheduled_end_time"] = scheduled_end_time
+    else:
+        if not channel_id:
+            return json.dumps({"error": "Stage/Voice events require a channel_id."})
+        body["channel_id"] = channel_id
+
+    ev = _discord_request("POST", f"/guilds/{guild_id}/scheduled-events", token, body=body)
+    return json.dumps({
+        "success": True,
+        "event_id": ev["id"],
+        "name": ev.get("name"),
+        "scheduled_start_time": ev.get("scheduled_start_time"),
+    })
+
+
+def _edit_scheduled_event(
+    token: str, guild_id: str, event_id: str,
+    name: str = "",
+    scheduled_start_time: str = "",
+    scheduled_end_time: str = "",
+    description: str = "",
+    channel_id: str = "",
+    location: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Edit an existing scheduled event. Only provided fields are changed."""
+    body: Dict[str, Any] = {}
+    if name:
+        body["name"] = name
+    if scheduled_start_time:
+        body["scheduled_start_time"] = scheduled_start_time
+    if scheduled_end_time:
+        body["scheduled_end_time"] = scheduled_end_time
+    if description:
+        body["description"] = description
+    if channel_id:
+        body["channel_id"] = channel_id
+    if location:
+        body["entity_metadata"] = {"location": location}
+
+    if not body:
+        return json.dumps({"error": "No edit fields provided."})
+
+    ev = _discord_request("PATCH", f"/guilds/{guild_id}/scheduled-events/{event_id}", token, body=body)
+    return json.dumps({
+        "success": True,
+        "event_id": ev["id"],
+        "name": ev.get("name"),
+    })
+
+
+def _delete_scheduled_event(token: str, guild_id: str, event_id: str, **_kwargs: Any) -> str:
+    """Delete a scheduled event."""
+    _discord_request("DELETE", f"/guilds/{guild_id}/scheduled-events/{event_id}", token)
+    return json.dumps({"success": True, "message": f"Scheduled event {event_id} deleted."})
+
+
+
+
+# ---------------------------------------------------------------------------
+# Messaging
+# ---------------------------------------------------------------------------
+
+def _send_message(
+    token: str, channel_id: str, content: str,
+    reply_to_message_id: str = "",
+    **_kwargs: Any,
+) -> str:
+    """Send a message to a channel or thread."""
+    if not content:
+        return json.dumps({"error": "content is required to send a message."})
+    body: Dict[str, Any] = {"content": content}
+    if reply_to_message_id:
+        body["message_reference"] = {"message_id": reply_to_message_id}
+    msg = _discord_request("POST", f"/channels/{channel_id}/messages", token, body=body)
+    return json.dumps({
+        "success": True,
+        "message_id": msg["id"],
+        "channel_id": msg.get("channel_id", channel_id),
+    })
+
+
+def _crosspost_message(token: str, channel_id: str, message_id: str, **_kwargs: Any) -> str:
+    """Crosspost a message from an announcement channel to subscribed channels."""
+    msg = _discord_request("POST", f"/channels/{channel_id}/messages/{message_id}/crosspost", token)
+    return json.dumps({
+        "success": True,
+        "message_id": msg.get("id", message_id),
+        "message": f"Message {message_id} crossposted.",
+    })
+
+
+def _create_poll(
+    token: str, channel_id: str,
+    poll_question: str = "",
+    poll_answers: str = "",
+    poll_duration: int = 24,
+    poll_multiselect: bool = False,
+    **_kwargs: Any,
+) -> str:
+    """Send a poll in a channel. poll_answers is a comma-separated list (2-10 items)."""
+    if not poll_question:
+        return json.dumps({"error": "poll_question is required."})
+    answers = [a.strip() for a in poll_answers.split(",") if a.strip()]
+    if len(answers) < 2 or len(answers) > 10:
+        return json.dumps({"error": f"Poll requires 2-10 answers, got {len(answers)}."})
+    body: Dict[str, Any] = {
+        "poll": {
+            "question": {"text": poll_question},
+            "answers": [{"poll_media": {"text": a}} for a in answers],
+            "duration": poll_duration,
+            "allow_multiselect": poll_multiselect,
+        }
+    }
+    msg = _discord_request("POST", f"/channels/{channel_id}/messages", token, body=body)
+    return json.dumps({
+        "success": True,
+        "message_id": msg["id"],
+        "poll": True,
+    })
+
+
+
+# ---------------------------------------------------------------------------
+# Voice state management
+# ---------------------------------------------------------------------------
+
+def _mute_member(token: str, guild_id: str, user_id: str, **_kwargs: Any) -> str:
+    """Mute a member in voice channels (server-mute)."""
+    _discord_request("PATCH", f"/guilds/{guild_id}/members/{user_id}", token, body={"mute": True})
+    return json.dumps({"success": True, "message": f"User {user_id} muted."})
+
+
+def _unmute_member(token: str, guild_id: str, user_id: str, **_kwargs: Any) -> str:
+    """Unmute a member in voice channels."""
+    _discord_request("PATCH", f"/guilds/{guild_id}/members/{user_id}", token, body={"mute": False})
+    return json.dumps({"success": True, "message": f"User {user_id} unmuted."})
+
+
+def _move_member(token: str, guild_id: str, user_id: str, channel_id: str, **_kwargs: Any) -> str:
+    """Move a member to a different voice channel."""
+    if not channel_id:
+        return json.dumps({"error": "channel_id is required to move a member."})
+    _discord_request("PATCH", f"/guilds/{guild_id}/members/{user_id}", token, body={"channel_id": channel_id})
+    return json.dumps({"success": True, "message": f"User {user_id} moved to channel {channel_id}."})
+
+
+def _disconnect_member(token: str, guild_id: str, user_id: str, **_kwargs: Any) -> str:
+    """Disconnect a member from their current voice channel."""
+    _discord_request("PATCH", f"/guilds/{guild_id}/members/{user_id}", token, body={"channel_id": None})
+    return json.dumps({"success": True, "message": f"User {user_id} disconnected."})
+
+# ---------------------------------------------------------------------------
+# Action dispatch + metadata
+# ---------------------------------------------------------------------------
+
+
 # ── action dispatch + metadata ───────────────────────────────────────────────
 # Single source of truth: (action, handler, required-param signature, description). Order is
 # the schema/enum order; the signature drives runtime required-param validation.
@@ -407,6 +1028,43 @@ _ACTION_MANIFEST = [
     ("create_thread", _create_thread, "(channel_id, name)", "create a public thread; optional message_id anchor"),
     ("add_role", _add_role, "(guild_id, user_id, role_id)", "assign a role"),
     ("remove_role", _remove_role, "(guild_id, user_id, role_id)", "remove a role"),
+    ("bulk_delete_messages", _bulk_delete_messages, "(channel_id, message_ids)", "bulk delete 2-100 messages (comma-separated IDs)"),
+    ("kick_member", _kick_member, "(guild_id, user_id)", "remove a member from the server"),
+    ("ban_member", _ban_member, "(guild_id, user_id)", "ban a user; optional delete_message_days (0-7)"),
+    ("unban_member", _unban_member, "(guild_id, user_id)", "unban a previously banned user"),
+    ("timeout_member", _timeout_member, "(guild_id, user_id)", "timeout/mute a member; optional duration_minutes (max 40320)"),
+    ("remove_timeout_member", _remove_timeout_member, "(guild_id, user_id)", "remove timeout from a member"),
+    ("change_nickname", _change_nickname, "(guild_id, nickname)", "change the bot's own nickname"),
+    ("manage_nickname", _manage_nickname, "(guild_id, user_id, nickname)", "change a member's nickname"),
+    ("create_channel", _create_channel, "(guild_id, name)", "create a new channel; optional channel_type/topic/parent_id/nsfw"),
+    ("edit_channel", _edit_channel, "(channel_id)", "edit channel settings; optional name/topic/nsfw/parent_id/rate_limit_per_user"),
+    ("delete_channel", _delete_channel, "(channel_id)", "delete a channel or category"),
+    ("create_category", _create_category, "(guild_id, name)", "create a new category"),
+    ("create_role", _create_role, "(guild_id, name)", "create a role; optional color/hoist/mentionable/permissions"),
+    ("edit_role", _edit_role, "(guild_id, role_id)", "edit a role; optional name/color/hoist/mentionable/permissions"),
+    ("delete_role", _delete_role, "(guild_id, role_id)", "delete a role"),
+    ("list_webhooks", _list_webhooks, "()", "list webhooks in a channel or guild; provide channel_id OR guild_id"),
+    ("create_webhook", _create_webhook, "(channel_id, name)", "create a new webhook in a channel"),
+    ("delete_webhook", _delete_webhook, "(webhook_id)", "delete a webhook"),
+    ("get_audit_log", _get_audit_log, "(guild_id)", "fetch audit log; optional limit/action_type/user_id"),
+    ("edit_message", _edit_message, "(channel_id, message_id)", "edit a message; optional content/embed_json"),
+    ("add_reaction", _add_reaction, "(channel_id, message_id, emoji)", "add an emoji reaction to a message"),
+    ("remove_reaction", _remove_reaction, "(channel_id, message_id, emoji)", "remove a bot emoji reaction from a message"),
+    ("archive_thread", _archive_thread, "(channel_id)", "archive a thread"),
+    ("unarchive_thread", _unarchive_thread, "(channel_id)", "unarchive a thread"),
+    ("delete_thread", _delete_thread, "(channel_id)", "delete a thread"),
+    ("list_thread_members", _list_thread_members, "(channel_id)", "list members of a thread"),
+    ("list_scheduled_events", _list_scheduled_events, "(guild_id)", "list scheduled events in a guild"),
+    ("create_scheduled_event", _create_scheduled_event, "(guild_id, name, scheduled_start_time)", "create a scheduled event; optional event_type/channel_id/location/description"),
+    ("edit_scheduled_event", _edit_scheduled_event, "(guild_id, event_id)", "edit an event; optional name/scheduled_start_time/scheduled_end_time/location/description"),
+    ("delete_scheduled_event", _delete_scheduled_event, "(guild_id, event_id)", "delete a scheduled event"),
+    ("send_message", _send_message, "(channel_id, content)", "send a message to a channel; optional reply_to_message_id"),
+    ("crosspost_message", _crosspost_message, "(channel_id, message_id)", "crosspost a message from an announcement channel"),
+    ("create_poll", _create_poll, "(channel_id, poll_question, poll_answers)", "send a poll; optional poll_duration/poll_multiselect"),
+    ("mute_member", _mute_member, "(guild_id, user_id)", "server-mute a member in voice channels"),
+    ("unmute_member", _unmute_member, "(guild_id, user_id)", "remove server-mute from a member"),
+    ("move_member", _move_member, "(guild_id, user_id, channel_id)", "move a member to a different voice channel"),
+    ("disconnect_member", _disconnect_member, "(guild_id, user_id)", "disconnect a member from voice channels"),
 ]
 _ACTIONS = {name: fn for name, fn, _sig, _desc in _ACTION_MANIFEST}
 _REQUIRED_PARAMS: Dict[str, List[str]] = {
@@ -493,6 +1151,133 @@ _SCHEMA_PROPERTIES: Dict[str, Any] = {
         "enum": [60, 1440, 4320, 10080],
         "description": "Thread archive duration in minutes (create_thread, default 1440).",
     },
+    "content": {
+        "type": "string",
+        "description": "Message content (send_message, edit_message).",
+    },
+    "embed_json": {
+        "type": "string",
+        "description": "JSON string of embed objects (edit_message).",
+    },
+    "reply_to_message_id": {
+        "type": "string",
+        "description": "Message ID to reply to (send_message).",
+    },
+    "reason": {
+        "type": "string",
+        "description": "Audit-log reason shown in server audit log (kick_member, ban_member, timeout_member).",
+    },
+    "delete_message_days": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 7,
+        "description": "Days of messages to delete when banning (ban_member, default 0).",
+    },
+    "duration_minutes": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 40320,
+        "description": "Timeout duration in minutes, max 40320 (28 days) (timeout_member, default 60).",
+    },
+    "nickname": {
+        "type": "string",
+        "description": "New nickname; empty string resets it (change_nickname, manage_nickname).",
+    },
+    "message_ids": {
+        "type": "string",
+        "description": "Comma-separated message IDs for bulk_delete_messages.",
+    },
+    "channel_type": {
+        "type": "string",
+        "enum": ["text", "voice", "announcement", "forum", "media"],
+        "description": "Channel type for create_channel (default 'text').",
+    },
+    "topic": {
+        "type": "string",
+        "description": "Channel topic (create_channel, edit_channel).",
+    },
+    "nsfw": {
+        "type": "boolean",
+        "description": "Mark channel as NSFW (create_channel, edit_channel).",
+    },
+    "parent_id": {
+        "type": "string",
+        "description": "Parent category ID (create_channel, edit_channel).",
+    },
+    "rate_limit_per_user": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 21600,
+        "description": "Slowmode duration in seconds (edit_channel). -1 means no change.",
+    },
+    "color": {
+        "type": "string",
+        "description": "Role color hex string like '#FF0000' (create_role, edit_role).",
+    },
+    "hoist": {
+        "type": "boolean",
+        "description": "Display role members separately in sidebar (create_role, edit_role).",
+    },
+    "mentionable": {
+        "type": "boolean",
+        "description": "Allow @mentioning this role (create_role, edit_role).",
+    },
+    "permissions": {
+        "type": "string",
+        "description": "Permission bitfield string (create_role, edit_role).",
+    },
+    "webhook_id": {
+        "type": "string",
+        "description": "Webhook ID (delete_webhook).",
+    },
+    "action_type": {
+        "type": "integer",
+        "description": "Audit log event type filter, 0 = no filter (get_audit_log).",
+    },
+    "emoji": {
+        "type": "string",
+        "description": "Emoji for reaction (Unicode like '👍' or custom ':name:id').",
+    },
+    "event_id": {
+        "type": "string",
+        "description": "Scheduled event ID (edit_scheduled_event, delete_scheduled_event).",
+    },
+    "event_type": {
+        "type": "string",
+        "enum": ["stage", "voice", "external"],
+        "description": "Event type for create_scheduled_event (default 'voice').",
+    },
+    "location": {
+        "type": "string",
+        "description": "Physical location for external events (create_scheduled_event).",
+    },
+    "scheduled_start_time": {
+        "type": "string",
+        "description": "ISO 8601 start time, e.g. 2024-12-31T20:00:00Z (create_scheduled_event).",
+    },
+    "scheduled_end_time": {
+        "type": "string",
+        "description": "ISO 8601 end time, optional (create_scheduled_event).",
+    },
+    "poll_question": {
+        "type": "string",
+        "description": "Poll question text, max 300 chars (create_poll).",
+    },
+    "poll_answers": {
+        "type": "string",
+        "description": "Comma-separated poll answers, 2-10 items, max 55 chars each (create_poll).",
+    },
+    "poll_duration": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 168,
+        "description": "Poll duration in hours, max 168 (create_poll, default 24).",
+    },
+    "poll_multiselect": {
+        "type": "boolean",
+        "description": "Allow multiple selections (create_poll, default false).",
+    },
+
 }
 
 _CONTENT_NOTE = (
@@ -563,7 +1348,124 @@ _ACTION_403_HINT = {
     "search_members": (
         "Likely missing the Server Members privileged intent — enable it in the Discord Developer Portal "
         "under your bot's settings."),
-    "member_info": "Bot cannot see this guild member (missing Server Members intent or insufficient permissions)."}
+    "member_info": "Bot cannot see this guild member (missing Server Members intent or insufficient permissions).",
+    "bulk_delete_messages": (
+        "Bot lacks MANAGE_MESSAGES permission in this channel."
+    ),
+    "kick_member": (
+        "Bot lacks KICK_MEMBERS permission, or the target is the server owner / "
+        "has a role higher than the bot."
+    ),
+    "ban_member": (
+        "Bot lacks BAN_MEMBERS permission, or the target is the server owner / "
+        "has a role higher than the bot."
+    ),
+    "unban_member": (
+        "Bot lacks BAN_MEMBERS permission."
+    ),
+    "timeout_member": (
+        "Bot lacks MODERATE_MEMBERS permission, or the target has a role higher "
+        "than the bot."
+    ),
+    "remove_timeout_member": (
+        "Bot lacks MODERATE_MEMBERS permission."
+    ),
+    "change_nickname": (
+        "Bot lacks CHANGE_NICKNAME permission (rare — usually means the server "
+        "has disabled nickname changes)."
+    ),
+    "manage_nickname": (
+        "Bot lacks MANAGE_NICKNAMES permission, or the target has a role higher "
+        "than the bot."
+    ),
+    "create_channel": (
+        "Bot lacks MANAGE_CHANNELS permission in this guild."
+    ),
+    "edit_channel": (
+        "Bot lacks MANAGE_CHANNELS permission, or cannot view this channel."
+    ),
+    "delete_channel": (
+        "Bot lacks MANAGE_CHANNELS permission, or cannot view this channel."
+    ),
+    "create_category": (
+        "Bot lacks MANAGE_CHANNELS permission in this guild."
+    ),
+    "create_role": (
+        "Bot lacks MANAGE_ROLES permission in this guild, or its highest role is not above the new role."
+    ),
+    "edit_role": (
+        "Bot lacks MANAGE_ROLES permission, or the target role sits higher than the bot's highest role."
+    ),
+    "delete_role": (
+        "Bot lacks MANAGE_ROLES permission, or the target role sits higher than the bot's highest role."
+    ),
+    "list_webhooks": (
+        "Bot lacks MANAGE_WEBHOOKS permission, or cannot view the target channel/guild."
+    ),
+    "create_webhook": (
+        "Bot lacks MANAGE_WEBHOOKS permission in this channel."
+    ),
+    "delete_webhook": (
+        "Bot lacks MANAGE_WEBHOOKS permission, or the webhook belongs to a channel the bot cannot manage."
+    ),
+    "get_audit_log": (
+        "Bot lacks VIEW_AUDIT_LOG permission in this guild."
+    ),
+    "edit_message": (
+        "Bot lacks MANAGE_MESSAGES permission, or the message is too old (>24h)."
+    ),
+    "add_reaction": (
+        "Bot lacks ADD_REACTIONS permission, or the emoji is invalid/unavailable."
+    ),
+    "remove_reaction": (
+        "Bot lacks ADD_REACTIONS permission, or the reaction does not exist."
+    ),
+    "archive_thread": (
+        "Bot lacks MANAGE_THREADS permission in this thread."
+    ),
+    "unarchive_thread": (
+        "Bot lacks MANAGE_THREADS permission in this thread."
+    ),
+    "delete_thread": (
+        "Bot lacks MANAGE_THREADS permission in this thread."
+    ),
+    "list_thread_members": (
+        "Bot cannot view this thread, or it has not joined the thread."
+    ),
+    "list_scheduled_events": (
+        "Bot lacks VIEW_GUILD_INSIGHTS or cannot access this guild."
+    ),
+    "create_scheduled_event": (
+        "Bot lacks CREATE_EVENTS permission in this guild."
+    ),
+    "edit_scheduled_event": (
+        "Bot lacks MANAGE_EVENTS permission, or the event no longer exists."
+    ),
+    "delete_scheduled_event": (
+        "Bot lacks MANAGE_EVENTS permission, or the event no longer exists."
+    ),
+    "send_message": (
+        "Bot lacks SEND_MESSAGES permission in this channel, or has been rate-limited."
+    ),
+    "crosspost_message": (
+        "Bot lacks SEND_MESSAGES, or the channel is not an announcement channel, or the message was already crossposted."
+    ),
+    "create_poll": (
+        "Bot lacks SEND_MESSAGES or SEND_POLLS permission in this channel."
+    ),
+    "mute_member": (
+        "Bot lacks MUTE_MEMBERS permission, or the target user has a higher role."
+    ),
+    "unmute_member": (
+        "Bot lacks MUTE_MEMBERS permission, or the target user has a higher role."
+    ),
+    "move_member": (
+        "Bot lacks MOVE_MEMBERS permission, or the target voice channel is inaccessible."
+    ),
+    "disconnect_member": (
+        "Bot lacks MOVE_MEMBERS permission, or the user is not in a voice channel."
+    ),
+}
 
 
 def _enrich_403(action: str, body: str) -> str:
@@ -581,7 +1483,15 @@ def check_discord_tool_requirements() -> bool:
 # ── handlers ─────────────────────────────────────────────────────────────────
 _HANDLER_DEFAULTS = {
     "guild_id": "", "channel_id": "", "user_id": "", "role_id": "", "message_id": "", "query": "",
-    "name": "", "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440}
+    "name": "", "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440,
+    "content": "", "embed_json": "", "reply_to_message_id": "", "reason": "",
+    "delete_message_days": 0, "duration_minutes": 60, "nickname": "", "message_ids": "",
+    "channel_type": "text", "topic": "", "nsfw": False, "parent_id": "",
+    "rate_limit_per_user": -1, "color": "", "hoist": False, "mentionable": False,
+    "permissions": "", "webhook_id": "", "action_type": 0, "emoji": "",
+    "event_id": "", "event_type": 2, "location": "", "scheduled_start_time": "",
+    "scheduled_end_time": "", "poll_question": "", "poll_answers": "",
+    "poll_duration": 24, "poll_multiselect": False}
 
 
 def _run_discord_action(action: str, valid_actions: Dict[str, Any], tool_label: str, **params: Any) -> str:
