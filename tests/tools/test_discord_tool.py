@@ -1,6 +1,9 @@
 """Tests for the Discord server introspection and management tool."""
 
 import json
+from pathlib import Path
+import urllib.error
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1130,6 +1133,24 @@ class TestModelToolsIntegration:
         actions = discord_admin_tool["function"]["parameters"]["properties"]["action"]["enum"]
         assert actions == ["list_guilds", "server_info"]
 
+    @patch("tools.discord_tool._discord_request")
+    def test_discord_tools_dropped_when_allowlist_empties_them(
+        self, mock_req, monkeypatch,
+    ):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"discord": {"server_actions": "all_bogus_names"}},
+        )
+        mock_req.return_value = {"flags": 0}
+
+        from model_tools import get_tool_definitions
+        tools = get_tool_definitions(enabled_toolsets=["hermes-discord"], quiet_mode=True)
+        names = [t.get("function", {}).get("name") for t in tools]
+        assert "discord" not in names
+        assert "discord_admin" not in names
+        assert "discord_server" not in names
+
 
 # ---------------------------------------------------------------------------
 # Snowflake ID validation
@@ -1255,3 +1276,59 @@ class TestSnowflakeValidation:
             action="fetch_messages", channel_id="11", before="1001", after="999"))
         assert "error" not in data
         assert mock_req.call_args.kwargs["params"] == {"limit": "50", "before": "1001", "after": "999"}
+
+
+# ---------------------------------------------------------------------------
+# Adapter signature regression guard — catches rebase-silent drops of
+# upstream params in discord-p2's heavily modified adapter.py
+# ---------------------------------------------------------------------------
+
+_ADAPTER_PATH = Path(__file__).parents[2] / "plugins" / "platforms" / "discord" / "adapter.py"
+_VIEW_PATH = Path(__file__).parents[2] / "plugins" / "platforms" / "discord" / "adapter_exec_approval_view.py"
+
+
+class TestAdapterSignatures:
+    """Verify known upstream method signatures survived the discord-p2 rebase.
+
+    The P1+P2 expansion rewrites large sections of adapter.py.  Small
+    upstream additions to shared methods (like ``allow_permanent`` on
+    ``send_exec_approval`` / ``_send_exec_approval_prompt``) can be silently lost
+    during ``update-hermes`` because git auto-merges non-conflicting regions.
+    """
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return _ADAPTER_PATH.read_text()
+
+    @pytest.fixture(scope="class")
+    def view_source(self) -> str:
+        return _VIEW_PATH.read_text() if _VIEW_PATH.exists() else _ADAPTER_PATH.read_text()
+
+    # -- send_exec_approval / _send_exec_approval_prompt -------------------
+
+    def test_send_exec_approval_has_allow_permanent(self, source: str) -> None:
+        assert "allow_permanent" in source, (
+            "adapter is missing allow_permanent parameter forwarding"
+        )
+
+    def test_send_exec_approval_has_smart_denied(self, source: str) -> None:
+        assert "smart_denied" in source, (
+            "adapter is missing smart_denied parameter forwarding"
+        )
+
+    # -- ExecApprovalView --------------------------------------------------
+
+    def test_exec_approval_view_has_allow_permanent(self, view_source: str) -> None:
+        assert "allow_permanent" in view_source, (
+            "ExecApprovalView is missing allow_permanent"
+        )
+
+    def test_exec_approval_view_has_smart_denied(self, view_source: str) -> None:
+        assert "smart_denied" in view_source, (
+            "ExecApprovalView is missing smart_denied"
+        )
+
+    def test_approval_file_exists(self) -> None:
+        assert _ADAPTER_PATH.is_file(), (
+            f"Adapter file not found at {_ADAPTER_PATH}"
+        )
