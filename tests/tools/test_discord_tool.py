@@ -1,6 +1,7 @@
 """Tests for the Discord server introspection and management tool."""
 
 import json
+from pathlib import Path
 import urllib.error
 from io import BytesIO
 from unittest.mock import MagicMock, patch
@@ -1167,3 +1168,86 @@ class TestModelToolsIntegration:
         assert discord_admin_tool is not None, "discord_admin should be in the schema"
         actions = discord_admin_tool["function"]["parameters"]["properties"]["action"]["enum"]
         assert actions == ["list_guilds", "server_info"]
+
+    @patch("tools.discord_tool._discord_request")
+    def test_discord_tools_dropped_when_allowlist_empties_them(
+        self, mock_req, monkeypatch,
+    ):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"discord": {"server_actions": "all_bogus_names"}},
+        )
+        mock_req.return_value = {"flags": 0}
+
+        from model_tools import get_tool_definitions
+        tools = get_tool_definitions(enabled_toolsets=["hermes-discord"], quiet_mode=True)
+        names = [t.get("function", {}).get("name") for t in tools]
+        assert "discord" not in names
+        assert "discord_admin" not in names
+        assert "discord_server" not in names
+
+
+# ---------------------------------------------------------------------------
+# Adapter signature regression guard — catches rebase-silent drops of
+# upstream params in discord-p2's heavily modified adapter.py
+# ---------------------------------------------------------------------------
+
+_ADAPTER_PATH = Path(__file__).parents[2] / "plugins" / "platforms" / "discord" / "adapter.py"
+
+
+class TestAdapterSignatures:
+    """Verify known upstream method signatures survived the discord-p2 rebase.
+
+    The P1+P2 expansion rewrites large sections of adapter.py.  Small
+    upstream additions to shared methods (like ``allow_permanent`` on
+    ``send_exec_approval``) can be silently lost during ``update-hermes``
+    because git auto-merges non-conflicting regions but the discord-p2
+    version of the function body has no knowledge of the new parameter.
+    """
+
+    @pytest.fixture(scope="class")
+    def source(self) -> str:
+        return _ADAPTER_PATH.read_text()
+
+    # -- send_exec_approval ------------------------------------------------
+
+    _SEND_SIG = (
+        "async def send_exec_approval(\n"
+        "        self, chat_id: str, command: str, session_key: str,\n"
+        "        description: str = \"dangerous command\",\n"
+        "        metadata: Optional[dict] = None,\n"
+        "        allow_permanent: bool = True,\n"
+        "        smart_denied: bool = False,\n"
+        "    ) -> SendResult:"
+    )
+
+    def test_send_exec_approval_has_allow_permanent(self, source: str) -> None:
+        assert "allow_permanent: bool = True" in source, (
+            "send_exec_approval() is missing allow_permanent param — "
+            "upstream gateway/run.py passes it; without it buttons fall "
+            "back to text /approve commands"
+        )
+
+    def test_send_exec_approval_has_smart_denied(self, source: str) -> None:
+        assert "smart_denied: bool = False" in source, (
+            "send_exec_approval() is missing smart_denied param"
+        )
+
+    # -- ExecApprovalView --------------------------------------------------
+
+    def test_exec_approval_view_has_allow_permanent(self, source: str) -> None:
+        assert "allow_permanent: bool = True" in source, (
+            "ExecApprovalView.__init__() is missing allow_permanent — "
+            "without it the 'Always Allow' button logic is broken"
+        )
+
+    def test_exec_approval_view_has_smart_denied(self, source: str) -> None:
+        assert "smart_denied: bool = False" in source, (
+            "ExecApprovalView.__init__() is missing smart_denied param"
+        )
+
+    def test_approval_file_exists(self) -> None:
+        assert _ADAPTER_PATH.is_file(), (
+            f"Adapter file not found at {_ADAPTER_PATH}"
+        )
