@@ -29,7 +29,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from agent.skill_utils import is_excluded_skill_path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import unquote, urljoin, urlparse, urlsplit, urlunparse
 
 import httpx
 import yaml
@@ -150,6 +150,46 @@ class SkillBundle:
     identifier: str
     trust_level: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+_ALLOWED_SUPPORT_DIRS = frozenset({"references", "templates", "scripts", "assets", "examples"})
+_LOCAL_LINK_RE = re.compile(
+    r"(?:\]\(|`|(?:^|[\s\"']))((?:references|templates|scripts|assets|examples)/[^\s)`\"'<>]+)",
+    re.MULTILINE,
+)
+_SUSPICIOUS_LOCAL_REF_RE = re.compile(
+    r"(?:references|templates|scripts|assets|examples)/(?:[^\s)`\"'<>]*/)?\.\.(?:/|$)"
+)
+
+
+def _referenced_support_paths(skill_md: str) -> Optional[set[str]]:
+    """Extract safe referenced paths; return None on a traversal attempt."""
+    normalized = skill_md.replace("\\", "/")
+    if _SUSPICIOUS_LOCAL_REF_RE.search(normalized):
+        return None
+    paths: set[str] = set()
+    for match in _LOCAL_LINK_RE.finditer(normalized):
+        raw = unquote(urlsplit(match.group(1).rstrip(".,;:")).path)
+        try:
+            safe = _validate_bundle_rel_path(raw)
+        except ValueError:
+            return None
+        if safe.split("/", 1)[0] in _ALLOWED_SUPPORT_DIRS:
+            paths.add(safe)
+    return paths
+
+
+def source_url_for_bundle(bundle: SkillBundle) -> str:
+    """Best available human-facing immutable-source provenance URL."""
+    explicit = bundle.metadata.get("source_url") or bundle.metadata.get("url")
+    if explicit:
+        return str(explicit)
+    if bundle.source == "github":
+        parts = bundle.identifier.split("/", 2)
+        if len(parts) >= 2:
+            suffix = f"/tree/main/{parts[2]}" if len(parts) == 3 else ""
+            return f"https://github.com/{parts[0]}/{parts[1]}{suffix}"
+    return bundle.identifier
 
 
 def _normalize_bundle_path(path_value: str, *, field_name: str, allow_nested: bool) -> str:
