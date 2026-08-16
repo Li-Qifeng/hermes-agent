@@ -5398,7 +5398,9 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             if view is not None:
                 view.live_auth, view.answer_extra = self._component_live_auth, getattr(self.config, "extra", None) or {}
                 view.current_gates = self._current_gate_sets
-            msg = await channel.send(**send_kwargs)
+            # 10s cap: a wedged channel.send (rate-limit hang, dead socket) must not
+            # block the gateway forever — ported from discord-p2 b4112aa0a2.
+            msg = await asyncio.wait_for(channel.send(**send_kwargs), timeout=10)
             if view is not None:
                 view._message = msg
             return SendResult(success=True, message_id=str(msg.id))
