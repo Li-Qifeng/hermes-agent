@@ -5224,7 +5224,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         try:
             channel = await self._resolve_channel(_prompt_target_id(chat_id, metadata))
             send_kwargs, view = build(channel)
-            msg = await channel.send(**send_kwargs)
+            # 10s cap: a wedged channel.send (rate-limit hang, dead socket) must not
+            # block the gateway forever — ported from discord-p2 b4112aa0a2.
+            msg = await asyncio.wait_for(channel.send(**send_kwargs), timeout=10)
             if view is not None:
                 view._message = msg
             return SendResult(success=True, message_id=str(msg.id))
