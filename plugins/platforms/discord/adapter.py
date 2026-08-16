@@ -5705,7 +5705,9 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
             send_kwargs, view = build(channel)
             if view is not None:
                 view.live_auth = self._component_live_auth
-            msg = await channel.send(**send_kwargs)
+            # 10s cap: a wedged channel.send (rate-limit hang, dead socket) must not
+            # block the gateway forever — ported from discord-p2 b4112aa0a2.
+            msg = await asyncio.wait_for(channel.send(**send_kwargs), timeout=10)
             if view is not None:
                 view._message = msg
             return SendResult(success=True, message_id=str(msg.id))
