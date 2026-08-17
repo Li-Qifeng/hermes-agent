@@ -125,11 +125,23 @@ def get_vertex_credentials(credentials_path: Optional[str] = None) -> Tuple[Opti
         cached = _creds_cache.get(cache_key)
         if cached is None:
             if resolved_path:
-                creds = service_account.Credentials.from_service_account_file(
-                    resolved_path,
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                )
-                project_id = creds.project_id
+                try:
+                    creds = service_account.Credentials.from_service_account_file(
+                        resolved_path,
+                        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                    )
+                    project_id = creds.project_id
+                except Exception as sa_err:
+                    # ADC (authorized_user) files are not service-account JSON.
+                    # Fall back to google.auth.default() which handles both types.
+                    logger.info(
+                        "Service-account parse failed for %s (%s); "
+                        "falling back to google.auth.default()",
+                        resolved_path, sa_err,
+                    )
+                    creds, project_id = google.auth.default(
+                        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+                    )
             else:
                 # google.auth.default() reads GOOGLE_APPLICATION_CREDENTIALS
                 # straight from os.environ internally — it has no notion of
