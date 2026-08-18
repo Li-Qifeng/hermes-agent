@@ -3820,6 +3820,8 @@ def delegate_task(
     action: Optional[str] = None,
     subagent_id: Optional[str] = None,
     message: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
     parent_agent=None,
     credentials_cfg: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -4066,6 +4068,24 @@ def delegate_task(
 
             _child_context = append_output_contract(_child_context, _task_schema)
         try:
+            # Per-task model/provider override: task > top-level > config > parent
+            _task_model = t.get("model") or model or creds["model"]
+            _task_provider = t.get("provider") or provider or creds["provider"]
+
+            # When per-task provider differs from config provider, re-resolve
+            # credentials for that provider so base_url/api_key/api_mode are
+            # correct for the target backend.
+            if _task_provider and _task_provider != creds.get("provider"):
+                _task_cfg = dict(cfg)
+                _task_cfg["provider"] = _task_provider
+                _task_cfg["model"] = _task_model
+                try:
+                    _task_creds = _resolve_delegation_credentials(_task_cfg, parent_agent)
+                except ValueError:
+                    _task_creds = creds  # fallback to config creds
+            else:
+                _task_creds = creds
+
             child = _build_child_preserving_parent_tools(
                 task_index=i,
                 goal=t["goal"],
@@ -4073,18 +4093,18 @@ def delegate_task(
                 # Subagents always inherit the parent's toolsets; the model
                 # cannot choose or narrow them (no model-facing toolsets arg).
                 toolsets=None,
-                model=creds["model"],
+                model=_task_model,
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"),
-                override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"),
+                override_provider=_task_creds["provider"],
+                override_base_url=_task_creds["base_url"],
+                override_api_key=_task_creds["api_key"],
+                override_api_mode=_task_creds["api_mode"],
+                override_request_overrides=_task_creds.get("request_overrides"),
+                override_max_tokens=_task_creds.get("max_output_tokens"),
+                override_acp_command=_task_creds.get("command"),
+                override_acp_args=_task_creds.get("args"),
                 role=effective_role,
             )
         except ValueError as exc:
@@ -5131,6 +5151,25 @@ DELEGATE_TASK_SCHEMA = {
                                 "background in every task that needs it."
                             ),
                         },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Per-task model override (e.g. 'deepseek-v4-flash', "
+                                "'glm-5.2'). When set, this child runs on the "
+                                "specified model instead of the global delegation "
+                                "model. Provider is inherited from delegation config "
+                                "or parent unless 'provider' is also set."
+                            ),
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": (
+                                "Per-task provider override (e.g. 'st', "
+                                "'fengshao', 'nvidia'). When set, credentials are "
+                                "resolved via the runtime provider system for this "
+                                "child only."
+                            ),
+                        },
                         "output_schema": {
                             "type": "object",
                             "description": (
@@ -5184,6 +5223,25 @@ DELEGATE_TASK_SCHEMA = {
                     "For action='steer': the course correction, appended to "
                     "the child's next tool result mid-run. Be directive and "
                     "specific."
+                ),
+            },
+            "model": {
+                "type": "string",
+                "description": (
+                    "Model override for all subagents in this call (e.g. "
+                    "'deepseek-v4-flash', 'glm-5.2'). When set, all children "
+                    "run on this model unless a per-task 'model' overrides "
+                    "it. Falls back to delegation.model config or parent "
+                    "model when omitted."
+                ),
+            },
+            "provider": {
+                "type": "string",
+                "description": (
+                    "Provider override for all subagents in this call (e.g. "
+                    "'st', 'fengshao', 'nvidia'). When set, credentials are "
+                    "resolved via the runtime provider system. Falls back to "
+                    "delegation.provider config or parent provider when omitted."
                 ),
             },
         },
@@ -5250,6 +5308,8 @@ registry.register(
         action=args.get("action"),
         subagent_id=args.get("subagent_id"),
         message=args.get("message"),
+        model=args.get("model"),
+        provider=args.get("provider"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
