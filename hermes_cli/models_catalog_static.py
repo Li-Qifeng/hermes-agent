@@ -286,6 +286,11 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "google/gemini-3.1-pro-preview", "google/gemini-3-pro-preview", "google/gemini-3.6-flash",
         "google/gemini-3.5-flash", "google/gemini-3.5-flash-lite", "google/gemini-3-flash-preview",
         "google/gemini-3.1-flash-lite-preview", "google/gemini-3.1-flash-lite",
+        "google/gemini-2.5-pro", "google/gemini-2.5-flash", "google/gemini-2.5-flash-lite",
+        "google/gemini-2.0-flash", "google/gemini-2.0-flash-lite",
+        "google/gemini-3.1-flash-image", "google/gemini-3.1-flash-lite-image",
+        "google/gemini-3-pro-image", "google/gemini-2.5-flash-image",
+        "google/imagen-4",
     ],
     "novita": [
         "moonshotai/kimi-k2.5", "minimax/minimax-m2.7", "zai-org/glm-5", "deepseek/deepseek-v3-0324",
