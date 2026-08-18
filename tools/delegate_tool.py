@@ -361,12 +361,13 @@ def _build_children(
     task_list: List[Dict[str, Any]], task_schemas: List[Optional[Dict[str, Any]]], creds: Dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: Dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list,
+    model: Optional[str] = None, provider: Optional[str] = None, cfg: Optional[Dict[str, Any]] = None,
 ) -> tuple[List[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
-    overrides = {
+    _default_overrides = {
         "override_provider": creds["provider"], "override_base_url": creds["base_url"],
         "override_api_key": creds["api_key"], "override_api_mode": creds["api_mode"],
         "override_request_overrides": creds.get("request_overrides"),
@@ -380,12 +381,35 @@ def _build_children(
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
+
+        # Per-task model/provider override: task > top-level > config > parent
+        _task_model = t.get("model") or model or creds["model"]
+        _task_provider = t.get("provider") or provider or creds["provider"]
+
+        if _task_provider and _task_provider != creds.get("provider"):
+            _task_cfg = dict(cfg) if cfg else {}
+            _task_cfg["provider"] = _task_provider
+            _task_cfg["model"] = _task_model
+            try:
+                _task_creds = _resolve_delegation_credentials(_task_cfg, parent_agent)
+            except ValueError:
+                _task_creds = creds
+            _overrides = {
+                "override_provider": _task_creds["provider"], "override_base_url": _task_creds["base_url"],
+                "override_api_key": _task_creds["api_key"], "override_api_mode": _task_creds["api_mode"],
+                "override_request_overrides": _task_creds.get("request_overrides"),
+                "override_max_tokens": _task_creds.get("max_output_tokens"), "override_acp_command": _task_creds.get("command"),
+                "override_acp_args": _task_creds.get("args"),
+            }
+        else:
+            _overrides = _default_overrides
+
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
+                model=_task_model, max_iterations=max_iterations, task_count=len(task_list),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **_overrides,
             )
         except ValueError as exc:
             return [], str(exc)
@@ -411,7 +435,8 @@ def delegate_task(
     goal: Optional[str] = None, context: Optional[str] = None, tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None, role: Optional[str] = None, background: Optional[bool] = None,
     output_schema: Optional[Dict[str, Any]] = None, action: Optional[str] = None, subagent_id: Optional[str] = None,
-    message: Optional[str] = None, parent_agent=None, credentials_cfg: Optional[Dict[str, Any]] = None,
+    message: Optional[str] = None, model: Optional[str] = None, provider: Optional[str] = None,
+    parent_agent=None, credentials_cfg: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Spawn child agents (single ``goal`` or ``tasks=[...]`` batch) or control running ones. ``action``
     list/steer/stop run synchronously and bypass the pause gate, depth limit and async dispatch. ``role`` is legacy
@@ -486,6 +511,7 @@ def delegate_task(
     children, err = _build_children(
         task_list, task_schemas, creds, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
         routing_cfg=routing_cfg, live_deleg_id=live_deleg_id, live_writers=live_writers,
+        model=model, provider=provider, cfg=cfg,
     )
     if err:
         return tool_error(err)
@@ -641,6 +667,17 @@ DELEGATE_TASK_SCHEMA = {
                             "together in ONE message; ungrouped tasks return individually as each finishes. This does not "
                             "order execution; if B needs A's output, dispatch B after A returns.",
                         ),
+                        "model": _p(
+                            "string",
+                            "Per-task model override (e.g. 'deepseek-v4-flash', 'glm-5.2'). When set, this child "
+                            "runs on the specified model instead of the global delegation model. Provider is "
+                            "inherited from delegation config or parent unless 'provider' is also set.",
+                        ),
+                        "provider": _p(
+                            "string",
+                            "Per-task provider override (e.g. 'st', 'fengshao', 'nvidia'). When set, credentials "
+                            "are resolved via the runtime provider system for this child only.",
+                        ),
                     },
                     "required": ["goal"],
                 },
@@ -663,6 +700,18 @@ DELEGATE_TASK_SCHEMA = {
                 "string",
                 "For action='steer': the course correction, appended to "
                 "the child's next tool result mid-run. Be directive and specific.",
+            ),
+            "model": _p(
+                "string",
+                "Model override for all subagents in this call (e.g. 'deepseek-v4-flash', 'glm-5.2'). "
+                "When set, all children run on this model unless a per-task 'model' overrides it. "
+                "Falls back to delegation.model config or parent model when omitted.",
+            ),
+            "provider": _p(
+                "string",
+                "Provider override for all subagents in this call (e.g. 'st', 'fengshao', 'nvidia'). "
+                "When set, credentials are resolved via the runtime provider system. "
+                "Falls back to delegation.provider config or parent provider when omitted.",
             ),
         },
         "required": [],
@@ -699,6 +748,7 @@ registry.register(
         max_iterations=args.get("max_iterations"), role=args.get("role"),
         background=_model_background_value(args, kw.get("parent_agent")), output_schema=args.get("output_schema"),
         action=args.get("action"), subagent_id=args.get("subagent_id"), message=args.get("message"),
+        model=args.get("model"), provider=args.get("provider"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,
