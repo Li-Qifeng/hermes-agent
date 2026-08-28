@@ -7955,6 +7955,15 @@ class AIAgent:
         replayed (Gemini 3 thinking models 400 without it). Defaults to
         stripping when no model is supplied.
 
+        **Cross-provider fallback fix:** When a non-Gemini primary model produces
+        tool_calls and then fallback switches to a Gemini-family model, the
+        replayed tool_calls carry no ``extra_content`` (Gemini thought_signature)
+        because the primary provider never attached one. Gemini 3 thinking models
+        reject these with HTTP 400. To handle this, when the target model is
+        Gemini-family, inject a ``skip_thought_signature_validator`` sentinel
+        *into every tool_call that lacks ``extra_content``*, mirroring the same
+        fallback pattern already used in ``gemini_native_adapter.py`` (line 359).
+
         Creates new tool_call dicts rather than mutating in-place, so the
         original messages list retains call_id/response_item_id for Codex
         Responses API compatibility (e.g. if the session falls back to a
@@ -7966,14 +7975,27 @@ class AIAgent:
         if not isinstance(tool_calls, list):
             return api_msg
         from agent.transports.chat_completions import _model_consumes_thought_signature
+        is_gemini = _model_consumes_thought_signature(model)
         _STRIP_KEYS = {"call_id", "response_item_id"}
-        if not _model_consumes_thought_signature(model):
+        if not is_gemini:
             _STRIP_KEYS = _STRIP_KEYS | {"extra_content"}
-        api_msg["tool_calls"] = [
-            {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
-            if isinstance(tc, dict) else tc
-            for tc in tool_calls
-        ]
+        new_tcs = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                new_tcs.append(tc)
+                continue
+            d = {k: v for k, v in tc.items() if k not in _STRIP_KEYS}
+            # Cross-provider fallback sentinel: when the target is Gemini but
+            # the tool_call came from a non-Gemini provider (no extra_content),
+            # inject a skip_thought_signature_validator.  Without this, Gemini 3
+            # thinking models reject replayed tool_calls with HTTP 400.
+            # Mirrors gemini_native_adapter.py:359.
+            if is_gemini and not d.get("extra_content"):
+                d["extra_content"] = {
+                    "google": {"thought_signature": "skip_thought_signature_validator"}
+                }
+            new_tcs.append(d)
+        api_msg["tool_calls"] = new_tcs
         return api_msg
 
     @staticmethod
