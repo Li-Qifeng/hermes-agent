@@ -667,6 +667,26 @@ def _print_fetch_failure(c: Console, sources, identifier: str, meta=None, source
     if rejected:
         c.print(f"[yellow]Hint:[/] GitHub rejected {' and '.join(rejected)} (401 Bad credentials). "
                 f"Replace or remove the token in {display_hermes_home()}/.env, or re-run [bold]gh auth login[/].")
+    # Surface an aggregate-repo hint if a source detected multiple skills.
+    aggregate_scan = None
+    for src in sources:
+        gh = getattr(src, "github", src)
+        scan = getattr(gh, "_last_aggregate_scan", None)
+        if scan:
+            aggregate_scan = scan
+            break
+    if aggregate_scan:
+        agg_repo, agg_paths = aggregate_scan
+        shown = agg_paths[:15]
+        c.print(
+            f"\n[yellow]'{agg_repo}' is an aggregate repo with "
+            f"{len(agg_paths)} skill(s):[/]"
+        )
+        for p in shown:
+            c.print(f"  hermes skills install {agg_repo}/{p}")
+        if len(agg_paths) > len(shown):
+            c.print(f"  [dim]... and {len(agg_paths) - len(shown)} more[/]")
+        c.print("\n[dim]Choose one of the commands above to install a specific skill.[/]\n")
     if rate_limited:
         c.print("[yellow]Hint:[/] GitHub API rate limit exhausted "
                 "(unauthenticated: 60 requests/hour).\n"
