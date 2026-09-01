@@ -697,6 +697,10 @@ class GitHubSource(SkillSource):
         # Survives within a single search/install flow, avoiding redundant API calls.
         self._tree_cache: Dict[str, Tuple[str, List[dict]]] = {}
         self._tree_revisions: Dict[str, str] = {}
+        # Last aggregate-repo scan result for error messages.
+        # Set by _fetch_from_aggregate_repo when multiple skills are found.
+        # Format: (repo, [path1, path2, ...])
+        self._last_aggregate_scan: Optional[Tuple[str, List[str]]] = None
         # Per-repo cache of the optional skills.sh.json grouping sidecar,
         # mapping skill_name -> human-readable grouping title. ``None`` means
         # "fetched, no sidecar"; a missing key means "not fetched yet".
@@ -757,10 +761,15 @@ class GitHubSource(SkillSource):
         identifier format: "owner/repo/path/to/skill-dir"
         """
         parts = identifier.split("/", 2)
-        if len(parts) < 3:
+        if len(parts) < 2:
             return None
 
         repo = f"{parts[0]}/{parts[1]}"
+
+        # owner/repo (no skill path) → scan aggregate repo for skills
+        if len(parts) == 2:
+            return self._fetch_from_aggregate_repo(repo, identifier)
+
         skill_path = parts[2]
 
         # Resolve the tree FIRST so every byte fetch in this install —
@@ -868,6 +877,84 @@ class GitHubSource(SkillSource):
                 "source_revision": revision,
             },
         )
+
+    def _fetch_from_aggregate_repo(
+        self, repo: str, identifier: str,
+    ) -> Optional[SkillBundle]:
+        """Scan an aggregate (multi-skill) repo for SKILL.md files.
+
+        Identifier is ``owner/repo`` (no skill path). Tries the repo root
+        first (``ninehills/skills`` layout), then common sub-directories
+        (``skills/``, ``skill/``). Returns a :class:`SkillBundle` when exactly
+        one skill is found, or ``None`` when zero or multiple skills are found
+        (the caller is expected to present the skill list instead).
+        """
+        found: List[str] = []
+
+        # 1) Check root for SKILL.md
+        root_files = self._download_directory_via_tree(repo, "")
+        if root_files and "SKILL.md" in root_files:
+            found.append("")
+
+        # 2) Scan immediate sub-directories via the cached repo tree
+        if not found:
+            cached = self._get_repo_tree(repo)
+            if cached is not None:
+                _default_branch, tree_entries = cached
+                for scan_path in ("skills", "skill"):
+                    prefix = f"{scan_path}/"
+                    for entry in tree_entries:
+                        if entry.get("type") != "tree":
+                            continue
+                        item_path = entry.get("path", "")
+                        if not item_path.startswith(prefix):
+                            continue
+                        name = item_path[len(prefix):].split("/")[0]
+                        if name.startswith((".", "_")):
+                            continue
+                        if name not in found:
+                            found.append(name)
+                    if found:
+                        break  # first scan path that yields skills wins
+
+        if not found:
+            return None
+
+        if len(found) == 1:
+            # Exactly one skill — fetch it directly.
+            skill_path = found[0]
+            files = self._download_directory_via_tree(repo, skill_path)
+            if not files or "SKILL.md" not in files:
+                return None
+            skill_name = (
+                skill_path.rstrip("/").split("/")[-1]
+                if skill_path else repo.split("/")[-1]
+            )
+            full_id = f"{repo}/{skill_path}" if skill_path else repo
+            pinned_ref = self._tree_revisions.get(repo)
+            return SkillBundle(
+                name=skill_name,
+                files=files,
+                source="github",
+                identifier=full_id,
+                trust_level=self.trust_level_for(full_id),
+                metadata={
+                    "source_url": (
+                        f"https://github.com/{full_id}"
+                        + (f"/tree/{pinned_ref}" if pinned_ref else "")
+                    ),
+                    "source_revision": pinned_ref or "",
+                },
+            )
+
+        # Multiple skills — store for caller and log.
+        self._last_aggregate_scan = (repo, found)
+        logger.info(
+            "Aggregate repo %s has %d skill(s): %s — "
+            "use `owner/repo/path` to install a specific one",
+            repo, len(found), ", ".join(found[:10]),
+        )
+        return None
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         """Fetch just the SKILL.md metadata for preview."""

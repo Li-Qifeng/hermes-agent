@@ -605,7 +605,29 @@ def do_install(identifier: str, category: str = "", force: bool = False,
             for src in sources
         )
         c.print(f"[bold red]Error:[/] Could not fetch '{identifier}' from any source.")
-        if rate_limited:
+        # Surface an aggregate-repo hint if a source detected multiple skills.
+        aggregate_scan = None
+        for src in sources:
+            gh = getattr(src, "github", src)
+            scan = getattr(gh, "_last_aggregate_scan", None)
+            if scan:
+                aggregate_scan = scan
+                break
+        if aggregate_scan:
+            agg_repo, agg_paths = aggregate_scan
+            shown = agg_paths[:15]
+            c.print(
+                f"\n[yellow]'{agg_repo}' is an aggregate repo with "
+                f"{len(agg_paths)} skill(s).[/] Install a specific one:\n"
+            )
+            for p in shown:
+                c.print(f"  hermes skills install {agg_repo}/{p}")
+            if len(agg_paths) > 15:
+                c.print(f"  ... and {len(agg_paths) - 15} more")
+            c.print(
+                "\n[dim]Tip: browse the repo on GitHub to see all available skills.[/]\n"
+            )
+        elif rate_limited:
             c.print(
                 "[yellow]Hint:[/] GitHub API rate limit exhausted "
                 "(unauthenticated: 60 requests/hour).\n"
