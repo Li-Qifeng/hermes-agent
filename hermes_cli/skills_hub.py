@@ -601,7 +601,27 @@ def _print_fetch_failure(c: Console, sources, identifier: str, meta=None, source
                 "its author. Try `hermes skills search` for an alternative.[/]\n")
         return
     c.print(f"[bold red]Error:[/] Could not fetch '{identifier}' from any source.")
-    if rate_limited:
+    # Surface an aggregate-repo hint if a source detected multiple skills.
+    aggregate_scan = None
+    for src in sources:
+        gh = getattr(src, "github", src)
+        scan = getattr(gh, "_last_aggregate_scan", None)
+        if scan:
+            aggregate_scan = scan
+            break
+    if aggregate_scan:
+        agg_repo, agg_paths = aggregate_scan
+        shown = agg_paths[:15]
+        c.print(
+            f"\n[yellow]'{agg_repo}' is an aggregate repo with "
+            f"{len(agg_paths)} skill(s):[/]"
+        )
+        for p in shown:
+            c.print(f"  hermes skills install {agg_repo}/{p}")
+        if len(agg_paths) > len(shown):
+            c.print(f"  [dim]... and {len(agg_paths) - len(shown)} more[/]")
+        c.print("\n[dim]Choose one of the commands above to install a specific skill.[/]\n")
+    elif rate_limited:
         c.print("[yellow]Hint:[/] GitHub API rate limit exhausted "
                 "(unauthenticated: 60 requests/hour).\n"
                 "Set [bold]GITHUB_TOKEN[/] in your .env or install the [bold]gh[/] CLI and run "

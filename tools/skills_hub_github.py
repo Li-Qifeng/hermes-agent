@@ -213,6 +213,7 @@ class GitHubSource(SkillSource):
         # repo -> skills.sh.json grouping map; None = fetched, no sidecar.
         self._skillsh_groupings: Dict[str, Optional[Dict[str, str]]] = {}
         self._rate_limited: bool = False
+        self._last_aggregate_scan: Optional[Tuple[str, List[str]]] = None
 
     @property
     def is_rate_limited(self) -> bool:  # whether the GitHub API rate limit was hit during operations
@@ -237,7 +238,10 @@ class GitHubSource(SkillSource):
         return _dedupe_by_trust(results)[:limit]
 
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
-        """Download a skill; identifier format: "owner/repo/path/to/skill-dir"."""
+        """Download a skill; identifier format: "owner/repo/path/to/skill-dir" or "owner/repo"."""
+        parts = identifier.split("/")
+        if len(parts) == 2:
+            return self._fetch_from_aggregate_repo(identifier)
         if (split := _split_repo_id(identifier)) is None:
             return None
         repo, skill_path = split
@@ -267,6 +271,82 @@ class GitHubSource(SkillSource):
             name=skill_dir.split("/")[-1], files=files, source="github", identifier=identifier,
             trust_level=self.trust_level_for(identifier), metadata={"source_url": url, "source_revision": revision},
         )
+
+    def _fetch_from_aggregate_repo(self, identifier: str) -> Optional[SkillBundle]:
+        """Scan an aggregate (multi-skill) repo for SKILL.md files.
+
+        Identifier is ``owner/repo`` (no skill path). Tries the repo root
+        first, then common sub-directories (``skills/``, ``skill/``). Returns
+        a SkillBundle when exactly one skill is found, or None when zero or
+        multiple skills are found (the scan result is stored on self for the CLI).
+        """
+        parts = identifier.split("/")
+        if len(parts) != 2:
+            return None
+        repo = f"{parts[0]}/{parts[1]}"
+
+        cached = self._get_repo_tree(repo)
+        if cached is None:
+            return None
+
+        _default_branch, tree_entries = cached
+        found: List[str] = []
+
+        # 1) Check root for SKILL.md
+        for entry in tree_entries:
+            if entry.get("path") == "SKILL.md" and entry.get("type") == "blob":
+                found.append("")
+                break
+
+        # 2) Scan immediate sub-directories under skills/ and skill/
+        if not found:
+            for scan_path in ("skills", "skill"):
+                prefix = f"{scan_path}/"
+                for entry in tree_entries:
+                    item_path = entry.get("path", "")
+                    if not item_path.startswith(prefix):
+                        continue
+                    if item_path.endswith("/SKILL.md"):
+                        sub_rel = item_path[len(prefix):-len("/SKILL.md")].rstrip("/")
+                        name = sub_rel.split("/")[0]
+                        candidate = f"{scan_path}/{name}"
+                        if not name.startswith((".", "_")) and candidate not in found:
+                            found.append(candidate)
+                if found:
+                    break
+
+        if not found:
+            return None
+
+        if len(found) == 1:
+            skill_path = found[0]
+            if skill_path:
+                return self.fetch(f"{repo}/{skill_path}")
+            # Single skill at root
+            pinned_ref = self._tree_revisions.get(repo)
+            skill_md = self._fetch_file_content(repo, "SKILL.md", ref=pinned_ref)
+            if skill_md is None:
+                return None
+            referenced = _referenced_support_paths(skill_md)
+            if referenced is None:
+                return None
+            files: Dict[str, Union[str, bytes]] = {"SKILL.md": skill_md}
+            if not self._collect_tree_files(repo, "", tree_entries, pinned_ref, referenced, files):
+                return None
+            revision = pinned_ref or cached[0]
+            url = f"https://github.com/{repo}/" + (f"tree/{revision}" if revision else "")
+            return SkillBundle(
+                name=repo.split("/")[-1], files=files, source="github", identifier=identifier,
+                trust_level=self.trust_level_for(identifier), metadata={"source_url": url, "source_revision": revision},
+            )
+
+        # Multiple skills — store for caller and log.
+        self._last_aggregate_scan = (repo, found)
+        logger.info(
+            "Aggregate repo %s has %d skill(s): %s — use `owner/repo/path` to install a specific one",
+            repo, len(found), ", ".join(found[:10]),
+        )
+        return None
 
     def _add_support_file(self, repo: str, item_path: str, rel_path: str, files: dict, shown: str, **kw) -> None:
         """Fetch one support file into ``files``; a failed fetch warns (naming ``shown``) and is skipped."""
