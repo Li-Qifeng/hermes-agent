@@ -134,6 +134,28 @@ EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60
 # credential cools down briefly instead.
 EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS = 60
 
+# Rolling-window throttle wording. SenseNova (and Z.AI / DashScope-style TPM
+# platforms) return a 429 whose body names a per-minute/per-token window that
+# reopens in seconds (~12s measured), yet the wording is quota-ish
+# ("Allocated quota exceeded") rather than classic "rate limit". A 1-hour bench
+# is ~300x the real recovery time, so a two-key pool collapses after each key
+# hits one 429 ("no available entries (all exhausted or empty)"). Matching is
+# semantic, not provider-keyed; only reached for a 429 already classified as
+# non-billing, so the worst-case mis-hit shortens a bench that was going to
+# retry anyway.
+_SHORT_WINDOW_THROTTLE_PATTERNS = (
+    "tpm", "rpm", "per minute", "per second",
+    "try again in", "retry after", "retry in",
+    "allocated quota exceeded",
+)
+
+
+def _is_short_window_throttle(error_message: Optional[str]) -> bool:
+    if not error_message:
+        return False
+    lowered = error_message.lower()
+    return any(p in lowered for p in _SHORT_WINDOW_THROTTLE_PATTERNS)
+
 # ``FailoverReason.billing`` as a bare string: the pool persists classified
 # failure semantics to JSON and must not import the classifier.
 FAILURE_REASON_BILLING = "billing"
@@ -317,6 +339,7 @@ def _exhausted_ttl(
     *,
     sole_credential: bool = False,
     failure_reason: Optional[str] = None,
+    error_message: Optional[str] = None,
 ) -> int:
     """Return cooldown seconds based on the HTTP status that caused exhaustion.
 
@@ -330,6 +353,13 @@ def _exhausted_ttl(
     bench regardless of status; 402 is billing by definition.
     Unverified billing (#82154) gets the short cooldown regardless of pool
     size (the credential may be healthy), unless the status is a true 402.
+
+    *error_message* is the provider's own 429 wording. A 429 that names a
+    rolling per-minute/per-token window (SenseNova ``tpm/rpm exhausted``,
+    ``Allocated quota exceeded``) reopens in seconds, so the 1-hour bench is
+    ~300x the real recovery time and collapses a multi-key pool after one hit
+    each. Shorten those to the brief cooldown even when the pool can rotate —
+    but never for billing, which still needs the full bench.
     """
     if error_code == 401:
         return EXHAUSTED_TTL_401_SECONDS
@@ -338,6 +368,8 @@ def _exhausted_ttl(
         return min(base, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS)
     is_billing = error_code == 402 or failure_reason == FAILURE_REASON_BILLING
     if sole_credential and not is_billing:
+        return min(base, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS)
+    if error_code == 429 and not is_billing and _is_short_window_throttle(error_message):
         return min(base, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS)
     return base
 
@@ -432,6 +464,7 @@ def _exhausted_until(entry: PooledCredential, *, sole_credential: bool = False) 
             entry.last_error_code,
             sole_credential=sole_credential,
             failure_reason=entry.failure_reason,
+            error_message=entry.last_error_message,
         )
     return None
 

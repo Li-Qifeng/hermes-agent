@@ -118,6 +118,12 @@ _RATE_LIMIT_PATTERNS = (
     "resource exhausted", "resource_exhausted", "resource-exhausted", "resourceexhausted",
     "rate increased too quickly", "throttlingexception", "too many concurrent requests",
     "servicequotaexceededexception", "throttling",
+    # SenseNova-style rolling-window quota walls arriving as 429 with billing-ish
+    # wording/codes ("Allocated quota exceeded", code=insufficient_quota; "rpm/tpm
+    # exhausted"). These are per-minute/per-account throttle windows (~12s recovery),
+    # not credit exhaustion — naming them here lets the 429 path's explicit-rate-limit
+    # guard override the billing heuristic.
+    "allocated quota exceeded", "tpm exhausted", "rpm exhausted",
 )
 
 # Server busy, credential fine: back off on the same key, never rotate. Z.AI/
