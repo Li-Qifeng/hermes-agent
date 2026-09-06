@@ -186,14 +186,29 @@ class ReasoningParamsMixin:
     def _sanitize_tool_calls_for_strict_api(api_msg: dict, model: "str | None" = None) -> dict:
         """Strip Codex Responses fields from tool_calls for strict Chat Completions APIs (Mistral, Fireworks
         400/422 on unknown fields). ``extra_content`` (Gemini thought_signature) is kept only for Gemini-family
-        models. Builds new dicts so the internal history keeps the Codex fields for a later fallback."""
+        models. Builds new dicts so the internal history keeps the Codex fields for a later fallback.
+
+        Cross-provider fallback: when a non-Gemini primary produced the tool_calls, they carry no
+        ``extra_content``; replaying them onto a Gemini-family target 400s on Gemini 3 thinking models.
+        Inject the ``skip_thought_signature_validator`` sentinel in that case, mirroring
+        ``gemini_native_adapter.py``'s fallback sentinel. A pre-existing real signature is never overwritten.
+        """
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
         from agent.transports.chat_completions import _model_consumes_thought_signature
-        strip = {"call_id", "response_item_id"} | (set() if _model_consumes_thought_signature(model) else {"extra_content"})
-        api_msg["tool_calls"] = [{k: v for k, v in tc.items() if k not in strip} if isinstance(tc, dict) else tc
-                                 for tc in tool_calls]
+        is_gemini = _model_consumes_thought_signature(model)
+        strip = {"call_id", "response_item_id"} | (set() if is_gemini else {"extra_content"})
+        sanitized = []
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                sanitized.append(tc)
+                continue
+            d = {k: v for k, v in tc.items() if k not in strip}
+            if is_gemini and not d.get("extra_content"):
+                d["extra_content"] = {"google": {"thought_signature": "skip_thought_signature_validator"}}
+            sanitized.append(d)
+        api_msg["tool_calls"] = sanitized
         return api_msg
 
     _sanitize_tool_call_arguments = _forward_static("agent.agent_runtime_helpers", "sanitize_tool_call_arguments")

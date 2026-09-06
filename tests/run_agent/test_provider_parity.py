@@ -256,6 +256,59 @@ class TestBuildApiKwargsOpenRouter:
         assert "extra_content" not in result["tool_calls"][0]
         assert "call_id" not in result["tool_calls"][0]
 
+    def test_sanitize_tool_calls_injects_sentinel_for_gemini_target_missing_signature(self, monkeypatch):
+        """Cross-provider fallback: a non-Gemini primary produced tool_calls
+        without extra_content (Gemini thought_signature), then fallback lands on
+        a Gemini-family model. Gemini 3 thinking models 400 on replayed tool_calls
+        missing the signature — so a skip_thought_signature_validator sentinel must
+        be injected into every tool_call lacking extra_content.
+        Mirrors gemini_native_adapter.py's fallback sentinel.
+        """
+        agent = _make_agent(monkeypatch, "openrouter")
+        api_msg = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "call_id": "call_1",
+                    "type": "function",
+                    # NO extra_content — produced by a non-Gemini primary model
+                    "function": {"name": "terminal", "arguments": "{}"},
+                },
+            ],
+        }
+        # Capture original dict object BEFORE the call — the function
+        # reassigns api_msg["tool_calls"] to new dicts, so grabbing it
+        # after would point at the sanitized copy.
+        orig_tc = api_msg["tool_calls"][0]
+        result = agent._sanitize_tool_calls_for_strict_api(
+            api_msg, model="google/gemini-3.6-flash"
+        )
+        tc = result["tool_calls"][0]
+        assert tc["extra_content"] == {
+            "google": {"thought_signature": "skip_thought_signature_validator"}
+        }
+        # call_id still stripped regardless of model
+        assert "call_id" not in tc
+
+        # Original tool_call dict object must remain unchanged (outgoing copies
+        # only) — Codex/Responses replay relies on the stored fields.
+        assert "extra_content" not in orig_tc
+        assert orig_tc["call_id"] == "call_1"
+
+    def test_sanitize_tool_calls_keeps_real_signature_for_gemini_target(self, monkeypatch):
+        """Gemini target + tool_call that already carries a real signature must
+        keep it (no sentinel overwrite)."""
+        agent = _make_agent(monkeypatch, "openrouter")
+        api_msg = self._api_msg_with_extra_content()  # SIG_123 already present
+        result = agent._sanitize_tool_calls_for_strict_api(
+            api_msg, model="google/gemini-3-pro-preview"
+        )
+        assert result["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "SIG_123"}
+        }
+
 
 
 
