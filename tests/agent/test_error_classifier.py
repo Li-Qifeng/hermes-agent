@@ -470,6 +470,77 @@ class TestClassifyApiError:
         assert result.retryable is True
         assert result.should_rotate_credential is True
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "inference exceeds tpm/rpm limit",
+            "rpm exhausted, please try again later",
+            "tpm exhausted, please slow down",
+            "Rate limit reached: 60 requests per minute",
+            "Rate limit reached: 100000 tokens per minute",
+            "Rate limit reached: 10 requests per second",
+            "Rate limit reached: 5000 tokens per second",
+            "too many concurrent requests",
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["http_429", "statusless_body", "statusless_message_only"])
+    def test_insufficient_quota_with_explicit_throttle_phrase_is_rate_limit(self, message, mode):
+        """SenseNova and compatible gateways stamp ``code=insufficient_quota`` on transient
+        TPM/RPM/concurrency throttles. When the message explicitly names a throughput or
+        concurrency throttle, it must classify as retryable ``rate_limit`` across HTTP 429,
+        status-less structured body, and status-less message-only paths."""
+        body = {
+            "error": {
+                "message": message,
+                "type": "rate_limit_error",
+                "code": "insufficient_quota",
+            }
+        }
+        raw = f"Error code: 429 - {body}"
+        if mode == "http_429":
+            e = MockAPIError(raw, status_code=429, body=body)
+        elif mode == "statusless_body":
+            e = MockAPIError(raw, status_code=None, body=body)
+        else:
+            e = Exception(raw)
+        result = classify_api_error(e, provider="sensenova", model="SenseChat-5")
+        assert result.reason == FailoverReason.rate_limit
+        assert result.retryable is True
+        assert result.should_rotate_credential is True
+        assert result.should_fallback is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "You exceeded your current quota, please check your plan and billing details.",
+            "Insufficient quota.",
+        ],
+    )
+    @pytest.mark.parametrize("error_type", ["insufficient_quota", "rate_limit_error"])
+    @pytest.mark.parametrize("mode", ["http_429", "statusless_body", "statusless_message_only"])
+    def test_genuine_insufficient_quota_remains_billing(self, message, error_type, mode):
+        """Guard: genuine OpenAI ``insufficient_quota`` credit/plan exhaustion must stay
+        non-retryable ``billing``, even when ``type`` is ``rate_limit_error``."""
+        body = {
+            "error": {
+                "message": message,
+                "type": error_type,
+                "code": "insufficient_quota",
+            }
+        }
+        raw = f"Error code: 429 - {body}"
+        if mode == "http_429":
+            e = MockAPIError(raw, status_code=429, body=body)
+        elif mode == "statusless_body":
+            e = MockAPIError(raw, status_code=None, body=body)
+        else:
+            e = Exception(raw)
+        result = classify_api_error(e, provider="openai", model="gpt-5")
+        assert result.reason == FailoverReason.billing
+        assert result.retryable is False
+        assert result.should_rotate_credential is True
+        assert result.should_fallback is True
+
     # ── Server errors ──
 
     def test_500_server_error(self):

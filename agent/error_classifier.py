@@ -140,6 +140,16 @@ _BILLING_ERROR_CODES = frozenset({
     "insufficient_credits_for_paid_model",
 })
 
+# Explicit throughput/concurrency throttle phrases that disambiguate providers
+# (e.g. SenseNova) stamping ``code=insufficient_quota`` on transient 429s from
+# genuine OpenAI credit exhaustion (which may also carry ``type=rate_limit_error``).
+_EXPLICIT_THROTTLE_PATTERNS = (
+    "exceeds tpm/rpm", "rpm exhausted", "tpm exhausted",
+    "requests per minute", "tokens per minute",
+    "requests per second", "tokens per second",
+    "too many concurrent requests",
+)
+
 # Transient rate limiting. Bedrock "Throttling error: Too many tokens" also
 # contains an overflow phrase; rate limit is matched first so throttle wins.
 _RATE_LIMIT_PATTERNS = (
@@ -148,6 +158,8 @@ _RATE_LIMIT_PATTERNS = (
     "resource exhausted", "resource_exhausted", "resource-exhausted", "resourceexhausted",
     "rate increased too quickly", "throttlingexception", "too many concurrent requests",
     "servicequotaexceededexception", "throttling",
+    "rpm exhausted", "tpm exhausted", "exceeds tpm/rpm",
+    "requests per second", "tokens per second",
 )
 
 # Server busy, credential fine: back off on the same key, never rotate. Z.AI/
@@ -569,8 +581,17 @@ def is_reasoning_field_rejection(error_msg: str) -> bool:
     return "unsupported" in near or any(m in msg for m in UNSUPPORTED_PARAM_MARKERS)
 
 
+def _is_insufficient_quota_throttle(code: str, error_msg: str) -> bool:
+    """True when ``insufficient_quota`` accompanies an explicit TPM/RPM/concurrency throttle phrase."""
+    return code in ("", "insufficient_quota") and (
+        code == "insufficient_quota" or "insufficient_quota" in error_msg
+    ) and any(p in error_msg for p in _EXPLICIT_THROTTLE_PATTERNS)
+
+
 def _billing_hints(error_msg: str) -> Verdict:
     """Billing verdict carrying the #82154 ambiguity marker when applicable."""
+    if _is_insufficient_quota_throttle("", error_msg):
+        return _V_RATE_LIMIT
     ctx: Dict[str, Any] = {}
     if any(p in error_msg for p in _UNVERIFIED_BILLING_PATTERNS):
         ctx = {"billing_unverified": True, "possible_content_filter": True}
@@ -893,6 +914,8 @@ def _by_error_code(c: _Ctx) -> Optional[Verdict]:
     # HTTP 200: retrying cannot succeed, a configured fallback still may.
     if c.code == PROVIDER_STREAM_NON_JSON_ERROR_CODE and "request validation failed:" in c.msg:
         return _V_FORMAT_ERROR
+    if _is_insufficient_quota_throttle(c.code, c.msg):
+        return _V_RATE_LIMIT
     verdict = _ERROR_CODE_VERDICTS.get(c.code)
     if verdict is None:
         family = _PROVIDER_CODE_FAMILIES.get(c.provider_slug, c.provider_slug)
@@ -906,6 +929,8 @@ def _by_message(c: _Ctx) -> Optional[Verdict]:
     head = _first_match(c.msg, _MESSAGE_HEAD_RULES)
     if head is not None:
         return head
+    if _is_insufficient_quota_throttle(c.code, c.msg):
+        return _V_RATE_LIMIT
     usage_limit = any(p in c.msg for p in _USAGE_LIMIT_PATTERNS)
     return _classify_402(c.msg, dict) if usage_limit else _first_match(c.msg, _MESSAGE_TAIL_RULES)
 
@@ -1050,7 +1075,9 @@ def _status_429(c: _Ctx) -> Verdict:
     # A structured billing code is decisive: LiteLLM stamps
     # ``terminal_quota_exhausted`` (a hard cap, not throttling) on 429s, and
     # this handler always returns, so _by_error_code never sees the code.
-    if c.code in _BILLING_ERROR_CODES:
+    # Exception: providers like SenseNova stamp ``insufficient_quota`` on
+    # transient TPM/RPM/concurrency throttles.
+    if c.code in _BILLING_ERROR_CODES and not _is_insufficient_quota_throttle(c.code, c.msg):
         return _V_BILLING
     # Z.AI/Zhipu reuse 429 for server-wide overload: back off on the same
     # key instead of burning the pool (#14038).
@@ -1061,6 +1088,8 @@ def _status_429(c: _Ctx) -> Verdict:
         upstream = _extract_upstream_provider_name(c.body)
         ctx = {"upstream_provider": upstream} if upstream else {}
         return _v(_R.upstream_rate_limit, should_fallback=True, error_context=ctx)
+    if "insufficient_quota" in c.msg and not _is_insufficient_quota_throttle(c.code, c.msg):
+        return _V_BILLING
     # Quota walls as 429 (Anthropic ``usage_limit_reached``, "quota", billing
     # phrases) are billing ONLY when the body is not itself a rate-limit phrase
     # ("Rate limit exceeded" contains "limit exceeded") and carries no reset/
