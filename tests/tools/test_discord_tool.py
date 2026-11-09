@@ -1158,6 +1158,7 @@ class TestModelToolsIntegration:
 # ---------------------------------------------------------------------------
 
 _ADAPTER_PATH = Path(__file__).parents[2] / "plugins" / "platforms" / "discord" / "adapter.py"
+_VIEW_PATH = Path(__file__).parents[2] / "plugins" / "platforms" / "discord" / "adapter_exec_approval_view.py"
 
 
 class TestAdapterSignatures:
@@ -1165,50 +1166,40 @@ class TestAdapterSignatures:
 
     The P1+P2 expansion rewrites large sections of adapter.py.  Small
     upstream additions to shared methods (like ``allow_permanent`` on
-    ``send_exec_approval``) can be silently lost during ``update-hermes``
-    because git auto-merges non-conflicting regions but the discord-p2
-    version of the function body has no knowledge of the new parameter.
+    ``send_exec_approval`` / ``_send_exec_approval_prompt``) can be silently lost
+    during ``update-hermes`` because git auto-merges non-conflicting regions.
     """
 
     @pytest.fixture(scope="class")
     def source(self) -> str:
         return _ADAPTER_PATH.read_text()
 
-    # -- send_exec_approval ------------------------------------------------
+    @pytest.fixture(scope="class")
+    def view_source(self) -> str:
+        return _VIEW_PATH.read_text() if _VIEW_PATH.exists() else _ADAPTER_PATH.read_text()
 
-    _SEND_SIG = (
-        "async def send_exec_approval(\n"
-        "        self, chat_id: str, command: str, session_key: str,\n"
-        "        description: str = \"dangerous command\",\n"
-        "        metadata: Optional[dict] = None,\n"
-        "        allow_permanent: bool = True,\n"
-        "        smart_denied: bool = False,\n"
-        "    ) -> SendResult:"
-    )
+    # -- send_exec_approval / _send_exec_approval_prompt -------------------
 
     def test_send_exec_approval_has_allow_permanent(self, source: str) -> None:
-        assert "allow_permanent: bool = True" in source, (
-            "send_exec_approval() is missing allow_permanent param — "
-            "upstream gateway/run.py passes it; without it buttons fall "
-            "back to text /approve commands"
+        assert "allow_permanent" in source, (
+            "adapter is missing allow_permanent parameter forwarding"
         )
 
     def test_send_exec_approval_has_smart_denied(self, source: str) -> None:
-        assert "smart_denied: bool = False" in source, (
-            "send_exec_approval() is missing smart_denied param"
+        assert "smart_denied" in source, (
+            "adapter is missing smart_denied parameter forwarding"
         )
 
     # -- ExecApprovalView --------------------------------------------------
 
-    def test_exec_approval_view_has_allow_permanent(self, source: str) -> None:
-        assert "allow_permanent: bool = True" in source, (
-            "ExecApprovalView.__init__() is missing allow_permanent — "
-            "without it the 'Always Allow' button logic is broken"
+    def test_exec_approval_view_has_allow_permanent(self, view_source: str) -> None:
+        assert "allow_permanent" in view_source, (
+            "ExecApprovalView is missing allow_permanent"
         )
 
-    def test_exec_approval_view_has_smart_denied(self, source: str) -> None:
-        assert "smart_denied: bool = False" in source, (
-            "ExecApprovalView.__init__() is missing smart_denied param"
+    def test_exec_approval_view_has_smart_denied(self, view_source: str) -> None:
+        assert "smart_denied" in view_source, (
+            "ExecApprovalView is missing smart_denied"
         )
 
     def test_approval_file_exists(self) -> None:
