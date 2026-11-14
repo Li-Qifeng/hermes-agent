@@ -515,12 +515,16 @@ def _sanitize_message(
                 keys.append("extra_content")
             key = coalesce_tool_call_id(tc) if mistral_tool_ids else ""
             mapped = _mistral_tool_id(key) if key else None
-            if keys or (mapped is not None and mapped != tc.get("id")):
+            needs_dummy_sig = not strip_extra_content and not _has_replayable_thought_signature(tc.get("extra_content"))
+            if keys or (mapped is not None and mapped != tc.get("id")) or needs_dummy_sig:
                 if copied_tool_calls is None:
                     copied_tool_calls = list(tool_calls)
-                copied_tool_calls[tc_idx] = {k: v for k, v in tc.items() if k not in keys}
+                tc_updated = {k: v for k, v in tc.items() if k not in keys}
                 if mapped is not None:
-                    copied_tool_calls[tc_idx]["id"] = mapped
+                    tc_updated["id"] = mapped
+                if needs_dummy_sig:
+                    tc_updated["extra_content"] = {"google": {"thought_signature": "skip_thought_signature_validator"}}
+                copied_tool_calls[tc_idx] = tc_updated
         if copied_tool_calls is not None:
             out_msg["tool_calls"] = copied_tool_calls
     return out_msg if strip_keys or remapped or copied_tool_calls is not None else None
